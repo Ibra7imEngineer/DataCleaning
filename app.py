@@ -4,11 +4,19 @@ import numpy as np
 import io
 import re
 import hashlib
+from dataclasses import dataclass, field
 from datetime import datetime, date
-try:
-    from groq import Groq
-except ImportError:
-    Groq = None
+import time
+import json
+import logging
+import difflib
+
+import os
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+logger = logging.getLogger(__name__)
 
 # ─── Optimization Module ───
 try:
@@ -21,27 +29,38 @@ try:
         init_session_state_optimized,
     )
 except ImportError:
-    st.warning("⚠️ Optimization module not available. Some features may be slower.")
+    logger.warning("Optimization module streamlit_optimizations not available; using built-in fallback.")
     # Fallback functions
     def optimize_dtypes(df, verbose=False):
         return df, {}
     def create_lazy_preview(df, preview_rows=100):
         return df.head(preview_rows), {"total_rows": len(df), "total_cols": len(df.columns)}
+    def create_safe_styler(df, *args, **kwargs):
+        return df.style
     def safe_dataframe_display(df, *args, **kwargs):
-        st.dataframe(df.head(100), use_container_width=True)
+        st.dataframe(df, use_container_width=True)
     def display_data_summary(df, *args, **kwargs):
         pass
+    def init_session_state_optimized():
+        return None
 
 # ─── Advanced Features ───
 try:
-    from advanced_cleaning import (
-        AdvancedCleaner, AuditTrail,
-        clean_phone_column, detect_phone_column,
-        clean_numeric_columns, detect_numeric_columns_with_text,
+    from core.text_processor import (
+        AdvancedCleaner,
+        AuditTrail,
+        clean_phone_column,
+        detect_phone_column,
+        clean_numeric_columns,
+        detect_numeric_columns_with_text,
         apply_fuzzy_matching,
-        clean_dates_advanced,
         optimize_memory,
-        read_csv_with_encoding_fallback
+        read_csv_with_encoding_fallback,
+    )
+    from core.date_cleaner import clean_dates_advanced
+    from stats.advanced_imputation import (
+        universal_missing_value_imputation,
+        streamlit_imputation_style,
     )
 except ImportError:
     st.warning("⚠️ Advanced cleaning features not available. Install requirements: pip install -r requirements.txt")
@@ -56,6 +75,28 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ─── FIX: Disable verbose client error reporting & handle DOM errors ───
+st.markdown("""
+<script>
+    // Suppress removeChild errors gracefully
+    (function() {
+        const originalRemoveChild = Node.prototype.removeChild;
+        Node.prototype.removeChild = function(child) {
+            try {
+                return originalRemoveChild.call(this, child);
+            } catch (e) {
+                if (e.name === 'NotFoundError' && e.message.includes('removeChild')) {
+                    console.warn('Safe removeChild error handled:', e);
+                    return child;
+                }
+                throw e;
+            }
+        };
+        window.streamlitShowErrorDetails = false;
+    })();
+</script>
+""", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DESIGN SYSTEM
@@ -98,627 +139,6 @@ MISSING_VALUES = {
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════════════
-# PROFESSIONAL AI CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# AI Service Configuration
-AI_CONFIG = {
-    "model": "llama-3.1-70b-versatile",
-    "max_tokens": 30,
-    "temperature": 0.0,
-    "top_p": 0.1,
-    "daily_quota": 50,  # Professional tier quota
-    "confidence_threshold": 0.8,
-    "supported_languages": ["ar", "en"],
-    "specializations": ["business_data", "arabic_text", "status_inference"]
-}
-
-def init_professional_ai():
-    """
-    Initialize professional AI system with enterprise-grade features.
-
-    Sets up quota management, performance monitoring, and quality assurance
-    for production-ready AI data cleaning operations.
-    """
-    today = date.today().isoformat()
-
-    # Initialize daily quota system
-    if "ai_session_date" not in st.session_state or st.session_state.ai_session_date != today:
-        st.session_state.ai_session_date = today
-        st.session_state.ai_usage_count = 0
-        st.session_state.ai_success_count = 0
-        st.session_state.ai_error_count = 0
-        st.session_state.ai_performance_log = []
-
-    # Initialize performance metrics
-    if "ai_performance_metrics" not in st.session_state:
-        st.session_state.ai_performance_metrics = {
-            "total_processed": 0,
-            "success_rate": 0.0,
-            "avg_confidence": 0.0,
-            "processing_time": [],
-            "error_types": {}
-        }
-
-def get_ai_quota_status():
-    """
-    Get comprehensive AI quota and performance status.
-
-    Returns:
-        dict: Detailed status information including usage, limits, and metrics
-    """
-    init_professional_ai()
-
-    remaining = max(0, AI_CONFIG["daily_quota"] - st.session_state.ai_usage_count)
-    usage_percent = (st.session_state.ai_usage_count / AI_CONFIG["daily_quota"]) * 100
-
-    success_rate = (
-        st.session_state.ai_success_count / st.session_state.ai_usage_count
-        if st.session_state.ai_usage_count > 0 else 0.0
-    )
-
-    return {
-        "remaining_quota": remaining,
-        "used_quota": st.session_state.ai_usage_count,
-        "total_quota": AI_CONFIG["daily_quota"],
-        "usage_percentage": round(usage_percent, 1),
-        "success_rate": round(success_rate, 2),
-        "can_use_ai": remaining > 0,
-        "performance_metrics": st.session_state.ai_performance_metrics
-    }
-
-def can_use_professional_ai():
-    """Check if professional AI services are available."""
-    status = get_ai_quota_status()
-    return status["can_use_ai"]
-
-def consume_ai_quota(success=True):
-    """
-    Consume AI quota and update performance metrics.
-
-    Args:
-        success (bool): Whether the AI operation was successful
-    """
-    if can_use_professional_ai():
-        st.session_state.ai_usage_count += 1
-
-        if success:
-            st.session_state.ai_success_count += 1
-        else:
-            st.session_state.ai_error_count += 1
-
-        return True
-    return False
-
-# Legacy compatibility functions
-def init_ai_quota():
-    """Legacy function - redirects to professional AI init."""
-    init_professional_ai()
-
-def get_remaining_quota():
-    """Legacy function - redirects to professional status."""
-    return get_ai_quota_status()["remaining_quota"]
-
-def can_use_ai():
-    """Legacy function - redirects to professional check."""
-    return can_use_professional_ai()
-
-def consume_quota():
-    """Legacy function - redirects to professional consumption."""
-    return consume_ai_quota()
-
-def display_professional_ai_status():
-    """
-    Display enterprise-grade AI status dashboard with comprehensive metrics and controls.
-
-    Shows advanced AI performance indicators, quota management, system health monitoring,
-    and professional analytics for production-ready data cleaning operations.
-    """
-    init_professional_ai()
-    status = get_ai_quota_status()
-
-    with st.expander("🚀 مركز الذكاء الاصطناعي المتقدم | Advanced AI Control Center", expanded=False):
-        # Professional Header
-        st.markdown("""
-        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                   color: white; padding: 1rem; border-radius: 10px; margin-bottom: 1rem;
-                   text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-            <h3 style="margin: 0; font-size: 1.2rem; font-weight: 600;">
-                🤖 نظام الذكاء الاصطناعي المتقدم لتنظيف البيانات
-            </h3>
-            <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem; opacity: 0.9;">
-                Advanced AI Data Cleaning System | معالجة ذكية وآمنة للبيانات
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # System Health Status
-        health_col, status_col = st.columns([1, 2])
-
-        with health_col:
-            if status["can_use_ai"]:
-                st.success("🟢 النظام يعمل بكفاءة | System Operational")
-            else:
-                st.error("🔴 تم الوصول للحد الأقصى | Quota Exceeded")
-
-        with status_col:
-            # AI Model Information
-            st.markdown(f"""
-            <div style="background: {C['bg2']}; padding: 0.8rem; border-radius: 8px;
-                       border: 1px solid {C['border']};">
-                <div style="font-size: 0.8rem; color: {C['text3']}; margin-bottom: 0.3rem;">
-                    نموذج الذكاء الاصطناعي | AI Model
-                </div>
-                <div style="font-size: 1rem; font-weight: 600; color: {C['cyan']};">
-                    {AI_CONFIG['model']}
-                </div>
-                <div style="font-size: 0.75rem; color: {C['text3']}; margin-top: 0.3rem;">
-                    درجة الحرارة: {AI_CONFIG['temperature']} | الحد الأقصى: {AI_CONFIG['max_tokens']} رمز
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        st.markdown("---")
-
-        # Professional Metrics Dashboard
-        st.markdown("### 📊 مؤشرات الأداء الرئيسية | Key Performance Indicators")
-
-        # Row 1: Core Metrics
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            quota_percentage = status["usage_percentage"]
-            quota_color = "#10B981" if quota_percentage < 50 else "#F59E0B" if quota_percentage < 80 else "#EF4444"
-            quota_icon = "🟢" if quota_percentage < 50 else "🟡" if quota_percentage < 80 else "🔴"
-
-            st.markdown(f"""
-            <div style="background: {C['bg2']}; padding: 1rem; border-radius: 8px;
-                       border: 1px solid {C['border']}; text-align: center;">
-                <div style="font-size: 2rem; margin-bottom: 0.5rem;">{quota_icon}</div>
-                <div style="font-size: 0.9rem; color: {C['text3']}; margin-bottom: 0.3rem;">
-                    الحصة اليومية | Daily Quota
-                </div>
-                <div style="font-size: 1.5rem; font-weight: 700; color: {C['accent']};">
-                    {status['used_quota']}/{status['total_quota']}
-                </div>
-                <div style="font-size: 0.8rem; color: {quota_color}; font-weight: 600;">
-                    {quota_percentage:.1f}%
-                </div>
-                <div style="margin-top: 0.5rem;">
-                    <div style="background: {C['bg3']}; border-radius: 4px; height: 6px;">
-                        <div style="background: {quota_color}; height: 6px; border-radius: 4px;
-                                  width: {min(quota_percentage, 100)}%;"></div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col2:
-            success_rate = status["success_rate"] * 100
-            success_color = "#10B981" if success_rate >= 80 else "#F59E0B" if success_rate >= 60 else "#EF4444"
-            success_icon = "✅" if success_rate >= 80 else "⚠️" if success_rate >= 60 else "❌"
-
-            st.markdown(f"""
-            <div style="background: {C['bg2']}; padding: 1rem; border-radius: 8px;
-                       border: 1px solid {C['border']}; text-align: center;">
-                <div style="font-size: 2rem; margin-bottom: 0.5rem;">{success_icon}</div>
-                <div style="font-size: 0.9rem; color: {C['text3']}; margin-bottom: 0.3rem;">
-                    معدل النجاح | Success Rate
-                </div>
-                <div style="font-size: 1.5rem; font-weight: 700; color: {success_color};">
-                    {success_rate:.0f}%
-                </div>
-                <div style="font-size: 0.8rem; color: {C['text3']};">
-                    من {status['used_quota']} عملية
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col3:
-            confidence = status["performance_metrics"].get("avg_confidence", 0.0)
-            confidence_color = "#10B981" if confidence >= 0.8 else "#F59E0B" if confidence >= 0.6 else "#EF4444"
-            confidence_icon = "🎯" if confidence >= 0.8 else "📊" if confidence >= 0.6 else "🔍"
-
-            st.markdown(f"""
-            <div style="background: {C['bg2']}; padding: 1rem; border-radius: 8px;
-                       border: 1px solid {C['border']}; text-align: center;">
-                <div style="font-size: 2rem; margin-bottom: 0.5rem;">{confidence_icon}</div>
-                <div style="font-size: 0.9rem; color: {C['text3']}; margin-bottom: 0.3rem;">
-                    متوسط الثقة | Avg Confidence
-                </div>
-                <div style="font-size: 1.5rem; font-weight: 700; color: {confidence_color};">
-                    {confidence:.2f}
-                </div>
-                <div style="font-size: 0.8rem; color: {C['text3']};">
-                    من 0.0 إلى 1.0
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col4:
-            total_processed = status["performance_metrics"].get("total_processed", 0)
-            processed_color = "#10B981" if total_processed > 0 else "#6B7280"
-
-            st.markdown(f"""
-            <div style="background: {C['bg2']}; padding: 1rem; border-radius: 8px;
-                       border: 1px solid {C['border']}; text-align: center;">
-                <div style="font-size: 2rem; margin-bottom: 0.5rem;">📈</div>
-                <div style="font-size: 0.9rem; color: {C['text3']}; margin-bottom: 0.3rem;">
-                    إجمالي المعالجة | Total Processed
-                </div>
-                <div style="font-size: 1.5rem; font-weight: 700; color: {processed_color};">
-                    {total_processed:,}
-                </div>
-                <div style="font-size: 0.8rem; color: {C['text3']};">
-                    صف معالج
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # Advanced Analytics Section
-        if status["performance_metrics"]["processing_time"] or status["performance_metrics"]["error_types"]:
-            st.markdown("---")
-            st.markdown("### 🔬 التحليلات المتقدمة | Advanced Analytics")
-
-            analytics_col1, analytics_col2 = st.columns(2)
-
-            with analytics_col1:
-                if status["performance_metrics"]["processing_time"]:
-                    avg_time = sum(status["performance_metrics"]["processing_time"]) / len(status["performance_metrics"]["processing_time"])
-                    st.info(f"⏱️ **متوسط وقت المعالجة**: {avg_time:.2f} ثانية لكل عنصر")
-
-                # Processing efficiency
-                if total_processed > 0:
-                    efficiency = (success_rate / 100) * (confidence / 1.0) * 100
-                    efficiency_color = "🟢" if efficiency >= 70 else "🟡" if efficiency >= 50 else "🔴"
-                    st.metric("كفاءة المعالجة | Processing Efficiency", f"{efficiency:.1f}%", efficiency_color)
-
-            with analytics_col2:
-                if status["performance_metrics"]["error_types"]:
-                    st.warning("⚠️ **أنواع الأخطاء المكتشفة | Detected Error Types:**")
-                    for error_type, count in status["performance_metrics"]["error_types"].items():
-                        st.write(f"• {error_type}: {count} مرات")
-                else:
-                    st.success("✅ **لا توجد أخطاء مكتشفة | No Errors Detected**")
-
-        # Professional Footer
-        st.markdown("---")
-        st.markdown("""
-        <div style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-                   color: white; padding: 0.8rem; border-radius: 8px; text-align: center;
-                   margin-top: 1rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <div style="font-size: 0.9rem; font-weight: 600;">
-                🚀 نظام الذكاء الاصطناعي جاهز للمعالجة المتقدمة
-            </div>
-            <div style="font-size: 0.8rem; opacity: 0.9; margin-top: 0.3rem;">
-                Advanced AI System Ready for Professional Data Processing
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # Professional Configuration Panel
-        with st.expander("⚙️ إعدادات متقدمة | Advanced Configuration", expanded=False):
-            st.markdown("### 🔧 إعدادات النموذج | Model Configuration")
-
-            config_col1, config_col2, config_col3 = st.columns(3)
-
-            with config_col1:
-                st.markdown(f"""
-                <div style="background: {C['bg2']}; padding: 0.8rem; border-radius: 6px;
-                           border: 1px solid {C['border']};">
-                    <div style="font-size: 0.8rem; color: {C['text3']}; margin-bottom: 0.3rem;">
-                        نموذج الذكاء الاصطناعي
-                    </div>
-                    <div style="font-size: 0.9rem; font-weight: 600; color: {C['cyan']};">
-                        {AI_CONFIG['model']}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with config_col2:
-                st.markdown(f"""
-                <div style="background: {C['bg2']}; padding: 0.8rem; border-radius: 6px;
-                           border: 1px solid {C['border']};">
-                    <div style="font-size: 0.8rem; color: {C['text3']}; margin-bottom: 0.3rem;">
-                        إعدادات الدقة
-                    </div>
-                    <div style="font-size: 0.9rem; font-weight: 600; color: {C['green']};">
-                        Temp: {AI_CONFIG['temperature']}
-                    </div>
-                    <div style="font-size: 0.8rem; color: {C['text3']}; margin-top: 0.2rem;">
-                        Top-P: {AI_CONFIG['top_p']}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            with config_col3:
-                st.markdown(f"""
-                <div style="background: {C['bg2']}; padding: 0.8rem; border-radius: 6px;
-                           border: 1px solid {C['border']};">
-                    <div style="font-size: 0.8rem; color: {C['text3']}; margin-bottom: 0.3rem;">
-                        الحصة اليومية
-                    </div>
-                    <div style="font-size: 0.9rem; font-weight: 600; color: {C['yellow']};">
-                        {AI_CONFIG['daily_quota']} عملية
-                    </div>
-                    <div style="font-size: 0.8rem; color: {C['text3']}; margin-top: 0.2rem;">
-                        قابلة للتخصيص
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            st.markdown("### 🎯 التخصصات | Specializations")
-            specializations_html = ""
-            for spec in AI_CONFIG['specializations']:
-                specializations_html += f"""
-                <span style="background: {C['accent']}; color: white; padding: 0.2rem 0.6rem;
-                           border-radius: 12px; font-size: 0.75rem; margin: 0.2rem; display: inline-block;">
-                    {spec}
-                </span>
-                """
-
-            st.markdown(f"""
-            <div style="background: {C['bg2']}; padding: 0.8rem; border-radius: 6px;
-                       border: 1px solid {C['border']}; margin-top: 0.5rem;">
-                {specializations_html}
-            </div>
-            """, unsafe_allow_html=True)
-
-            # System Status
-            st.markdown("### 🔍 حالة النظام | System Status")
-            status_items = [
-                ("حالة الاتصال", "🟢 متصل", "AI service connection"),
-                ("حالة النموذج", "🟢 جاهز", "Model availability"),
-                ("معالجة الطلبات", "🟢 نشط", "Request processing"),
-                ("أمان البيانات", "🟢 محمي", "Data security")
-            ]
-
-            for item_ar, status, item_en in status_items:
-                st.markdown(f"""
-                <div style="display: flex; justify-content: space-between; align-items: center;
-                           background: {C['bg2']}; padding: 0.5rem 0.8rem; border-radius: 4px;
-                           margin: 0.3rem 0; border: 1px solid {C['border']};">
-                    <span style="font-size: 0.85rem; color: {C['text']};">{item_ar}</span>
-                    <span style="font-size: 0.85rem; font-weight: 600; color: {C['green']};">{status}</span>
-                </div>
-                """, unsafe_allow_html=True)
-
-        # Professional Activity Log
-        if st.session_state.get('ai_performance_log'):
-            with st.expander("📋 سجل الأنشطة | Activity Log", expanded=False):
-                st.markdown("### 🕒 آخر الأنشطة | Recent Activities")
-
-                log_data = st.session_state.ai_performance_log[-10:]  # Show last 10 activities
-
-                if log_data:
-                    for i, activity in enumerate(reversed(log_data)):
-                        timestamp = activity.get('timestamp', 'N/A')
-                        corrections = activity.get('corrections', 0)
-                        confidence = activity.get('confidence', 0.0)
-
-                        # Format timestamp
-                        try:
-                            from datetime import datetime
-                            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                            formatted_time = dt.strftime('%H:%M:%S')
-                        except:
-                            formatted_time = timestamp[:19]
-
-                        activity_color = C['green'] if corrections > 0 else C['text3']
-
-                        st.markdown(f"""
-                        <div style="display: flex; justify-content: space-between; align-items: center;
-                                   background: {C['bg2']}; padding: 0.6rem 0.8rem; border-radius: 6px;
-                                   margin: 0.4rem 0; border: 1px solid {C['border']};">
-                            <div style="display: flex; align-items: center; gap: 0.8rem;">
-                                <span style="font-size: 0.8rem; color: {C['text3']}; font-weight: 600;">
-                                    #{len(log_data)-i}
-                                </span>
-                                <span style="font-size: 0.85rem; color: {activity_color};">
-                                    تم تصحيح {corrections} قيمة
-                                </span>
-                            </div>
-                            <div style="text-align: right;">
-                                <div style="font-size: 0.8rem; color: {C['cyan']}; font-weight: 600;">
-                                    {formatted_time}
-                                </div>
-                                <div style="font-size: 0.75rem; color: {C['text3']};">
-                                    ثقة: {confidence:.2f}
-                                </div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                else:
-                    st.info("📝 لا توجد أنشطة مسجلة بعد | No activities logged yet")
-
-def ai_semantic_clean(row_data):
-
-    api_key = st.secrets.get("GROQ_API_KEY")
-    if not api_key:
-        st.warning("⚠️ يرجى تعيين GROQ_API_KEY في إعدادات Streamlit")
-        return row_data.get('Status', '')
-
-    try:
-        client = Groq(api_key=api_key)
-
-        # Enhanced professional system prompt
-        system_prompt = """
-أنت خبير متخصص في تنظيف ومعالجة البيانات العربية للأعمال التجارية.
-
-مهامك الرئيسية:
-1. تصحيح الأخطاء الإملائية العربية الشائعة بدقة عالية
-2. توحيد المصطلحات والحالات المختلفة لنفس المعنى
-3. استنتاج القيم المفقودة بناءً على السياق التجاري المنطقي
-4. ضمان الاتساق في البيانات التجارية
-
-قواعد التصحيح:
-• 'نم' ↔ 'تم' (إنجاز)
-• 'ولد♂' ↔ 'ولد' (تنظيف الرموز)
-• 'انثى♀' ↔ 'انثى' (تنظيف الرموز)
-• 'غير محدد' ↔ استنتاج من السياق
-• 'معلق' ↔ 'قيد المراجعة' (توحيد المصطلحات)
-
-الحالة التجارية الشائعة:
-- تم، مكتمل، منجز
-- معلق، قيد المراجعة، في الانتظار
-- ملغي، مرفوض
-- قيد التنفيذ، جاري العمل
-- مؤكد، معتمد
-
-الاستنتاج السياقي:
-- سعر مرتفع + اسم منتج → "تم" أو "مكتمل"
-- سعر منخفض/صفر + حالة فارغة → "معلق" أو "ملغي"
-- اسم منتج يشير للإنجاز → "تم"
-
-أجب بـ: القيمة المصححة فقط، بدون أي تفسيرات إضافية.
-"""
-
-        # Enhanced user prompt with more context
-        user_prompt = f"""
-قم بتنظيف وتصحيح حالة الطلب التالية:
-
-البيانات الحالية:
-- الحالة: "{row_data.get('Status', '')}"
-- السعر: "{row_data.get('Price', '')}"
-- اسم المنتج: "{row_data.get('Item Name', '')}"
-- رقم الطلب: "{row_data.get('Order ID', '')}"
-
-المطلوب: أعد القيمة المصححة والموحدة للحالة فقط.
-"""
-
-        response = client.chat.completions.create(
-            model="llama-3.1-70b-versatile",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=30,  # More precise limit
-            temperature=0.0,  # Maximum consistency
-            top_p=0.1  # More focused responses
-        )
-
-        corrected_value = response.choices[0].message.content.strip()
-
-        # Professional validation
-        if not corrected_value or len(corrected_value) > 50:
-            return row_data.get('Status', '')
-
-        # Remove any unwanted formatting
-        corrected_value = corrected_value.replace('"', '').replace("'", "")
-
-        return corrected_value
-
-    except Exception as e:
-        st.error(f"❌ فشل في معالجة البيانات بالذكاء الاصطناعي: {str(e)}")
-        return row_data.get('Status', '')
-
-def apply_ai_cleaning(df):
-    """
-    Professional AI-powered data cleaning with intelligent processing.
-
-    Applies advanced AI algorithms to identify and correct data inconsistencies,
-    with comprehensive logging and quality assurance.
-
-    Args:
-        df (pd.DataFrame): Input DataFrame requiring AI cleaning
-
-    Returns:
-        tuple: (cleaned_dataframe, processing_stats)
-            - cleaned_dataframe: DataFrame with AI corrections applied
-            - processing_stats: dict with processing metrics
-    """
-    if 'Status' not in df.columns:
-        return df, {"processed_rows": 0, "corrections_made": 0, "ai_confidence": 0.0}
-
-    # Enhanced problematic row detection
-    problematic_patterns = [
-        'نم', 'غير محدد', 'غير معروف', 'فارغ', 'null', 'nan',
-        'معلق', 'ملغي', 'قيد', 'مكتمل', 'تم', 'انثى♀', 'ولد♂'
-    ]
-
-    problematic_mask = (
-        df['Status'].isna() |
-        (df['Status'].str.strip() == '') |
-        df['Status'].str.contains('|'.join(problematic_patterns), na=False, case=False, regex=True)
-    )
-
-    if not problematic_mask.any():
-        return df, {"processed_rows": 0, "corrections_made": 0, "ai_confidence": 1.0}
-
-    problematic_rows = df[problematic_mask].copy()
-    processed_count = 0
-    corrections_made = 0
-    confidence_scores = []
-
-    progress_bar = st.progress(0, text="🔄 معالجة البيانات بالذكاء الاصطناعي...")
-    total_rows = len(problematic_rows)
-
-    for i, (idx, row) in enumerate(problematic_rows.iterrows()):
-        if not can_use_ai():
-            st.warning("⚠️ تم الوصول لحد استخدام الذكاء الاصطناعي")
-            break
-
-        # Enhanced context collection
-        row_data = {
-            'Status': str(row.get('Status', '')).strip(),
-            'Price': str(row.get('Price', '')).strip(),
-            'Item Name': str(row.get('Item Name', '')).strip(),
-            'Order ID': str(row.get('Order ID', '')).strip() if 'Order ID' in df.columns else ''
-        }
-
-        original_status = row_data['Status']
-        corrected_status = ai_semantic_clean(row_data)
-
-        if corrected_status and corrected_status != original_status:
-            df.at[idx, 'Status'] = corrected_status
-            corrections_made += 1
-            confidence_scores.append(0.9)  # High confidence for AI corrections
-        else:
-            confidence_scores.append(0.5)  # Lower confidence for no changes
-
-        processed_count += 1
-        consume_quota()
-
-        # Update progress
-        progress_bar.progress((i + 1) / total_rows,
-                            text=f"🔄 تم معالجة {i + 1} من {total_rows} صف")
-
-        # Update progress
-        progress_bar.progress((i + 1) / total_rows,
-                            text=f"🔄 تم معالجة {i + 1} من {total_rows} صف")
-
-    progress_bar.empty()
-
-    # Calculate overall confidence
-    avg_confidence = sum(confidence_scores) / len(confidence_scores) if confidence_scores else 0.0
-
-    # Update performance metrics
-    st.session_state.ai_performance_metrics["total_processed"] += processed_count
-    st.session_state.ai_performance_metrics["avg_confidence"] = (
-        (st.session_state.ai_performance_metrics["avg_confidence"] +
-         avg_confidence) / 2 if st.session_state.ai_performance_metrics["total_processed"] > processed_count
-        else avg_confidence
-    )
-
-    processing_stats = {
-        "processed_rows": processed_count,
-        "corrections_made": corrections_made,
-        "ai_confidence": round(avg_confidence, 2),
-        "success_rate": round(corrections_made / processed_count, 2) if processed_count > 0 else 0.0
-    }
-
-    if corrections_made > 0:
-        st.success(f"✅ تم تصحيح {corrections_made} قيمة باستخدام الذكاء الاصطناعي المتقدم")
-        # Log successful corrections
-        st.session_state.ai_performance_log.append({
-            "timestamp": datetime.now().isoformat(),
-            "corrections": corrections_made,
-            "confidence": avg_confidence
-        })
-
-    return df, processing_stats
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # CSS
 # ═══════════════════════════════════════════════════════════════════════════════
 def inject_css():
@@ -726,7 +146,13 @@ def inject_css():
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800;900&family=Inter:wght@300;400;500;600;700;800&display=swap');
 
-    *, *::before, *::after {{ box-sizing: border-box; }}
+    /* ─── FIX: Prevent animation-related DOM errors ─── */
+    * {{
+        box-sizing: border-box;
+        will-change: auto !important;
+    }}
+    
+    *::before, *::after {{ box-sizing: border-box; }}
 
     html, body,
     [data-testid="stAppViewContainer"],
@@ -749,7 +175,7 @@ def inject_css():
         font-family: 'Tajawal', 'Inter', sans-serif !important;
         background: transparent !important;
     }}
-    section[data-testid="stSidebar"] {{ width: 290px !important; }}
+    section[data-testid="stSidebar"] {{ width: 290px !important; max-width: 100% !important; }}
 
     h1,h2,h3,h4,h5,h6 {{
         font-family: 'Tajawal', 'Inter', sans-serif !important;
@@ -839,6 +265,9 @@ def inject_css():
     [data-testid="stFileUploader"] button:hover {{
         transform: translateY(-2px) !important;
         box-shadow: 0 4px 12px rgba(59,130,246,0.25) !important;
+    }}
+    [data-testid="stFileUploader"] button [data-testid="stIconMaterial"] {{
+        display: none !important;
     }}
     .stTabs [data-baseweb="tab-list"] {{
         background: linear-gradient(135deg, {C['bg2']}, {C['bg1']}) !important;
@@ -1211,7 +640,7 @@ def inject_css():
         color: {C['green']};
         border: 1px solid rgba(16,185,129,0.25);
     }}
-    .badge-ai {{
+    .badge-advanced {{
         background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(139,92,246,0.08));
         color: {C['accent3']};
         border: 1px solid rgba(139,92,246,0.25);
@@ -1508,6 +937,41 @@ def inject_css():
         border-radius: 1px;
     }}
 
+    /* Responsive layout for tablets and phones */
+    @media (max-width: 1280px) {{
+        .block-container {{ padding: 1.6rem 1.2rem !important; }}
+        section[data-testid="stSidebar"] {{ width: min(320px, 100%) !important; }}
+        [data-testid="stSidebar"] {{ border-left: none !important; border-top: 1px solid {C['border']} !important; }}
+        .stTabs [data-baseweb="tab"] {{ padding: 0.65rem 1rem !important; font-size: 0.95rem !important; }}
+        .hero {{ padding: 2.2rem 1.2rem 1.4rem; }}
+        .stage-header, .stepper-wrap, .metric-card, .impact-card, .feature-card, .quality-card, .col-profile {{ padding: 1.3rem 1rem !important; }}
+    }}
+    @media (max-width: 950px) {{
+        .block-container {{ padding: 1.2rem 1rem !important; }}
+        .hero-title {{ font-size: 2.4rem !important; }}
+        .hero-subtitle {{ font-size: 1rem !important; max-width: 100% !important; }}
+        .stepper-wrap {{ flex-direction: column; gap: 1rem; padding: 1rem 1rem !important; }}
+        .stepper-line {{ max-width: 50px; }}
+        .step-item {{ flex-direction: column; align-items: stretch; gap: 0.75rem; }}
+        .col-stats {{ flex-direction: column; gap: 0.7rem; }}
+        [data-testid="stDataFrame"] {{ overflow-x: auto !important; }}
+        [data-testid="stFileUploader"] {{ padding: 1.8rem 1rem !important; }}
+    }}
+    @media (max-width: 700px) {{
+        html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main, .block-container {{ font-size: 0.95rem !important; }}
+        .block-container {{ padding: 1rem 0.8rem !important; }}
+        .hero-title {{ font-size: 2rem !important; }}
+        .hero-subtitle {{ font-size: 0.95rem !important; }}
+        .stButton > button, .stDownloadButton > button {{ padding: 0.75rem 1rem !important; }}
+        .sb-logo, .sb-section {{ padding: 0.9rem 0.95rem !important; }}
+        .stage-header {{ padding: 1.2rem 0.95rem !important; }}
+        .stepper-wrap {{ padding: 0.9rem 0.8rem !important; }}
+        .stepper-label {{ font-size: 0.8rem !important; }}
+        .step-title {{ font-size: 0.9rem !important; }}
+        .metric-card, .impact-card, .feature-card {{ padding: 1rem !important; }}
+        .stage-header-desc, .hero-subtitle {{ line-height: 1.6 !important; }}
+    }}
+
     #MainMenu {{ visibility:hidden; }}
     footer {{ visibility:hidden; }}
     header {{ visibility:hidden; }}
@@ -1535,21 +999,28 @@ def init_state():
         "quality_after": 0,
         "cleaning_log": [],
         "detected_langs": {},
-        # ─── AI Quota ───
-        "ai_quota_date": None,
-        "ai_quota_used": 0,
         # ─── Outlier Detection ───
         "selected_outlier_columns": [],
         # ─── Advanced Features ───
         "advanced_options": {
-            "clean_phones": False,
-            "clean_numeric": False,
-            "fuzzy_match": False,
-            "fix_dates": False,
-            "optimize_memory": False,
+            "clean_phones": bool(AdvancedCleaner),
+            "clean_numeric": bool(AdvancedCleaner),
+            "fuzzy_match": bool(AdvancedCleaner),
+            "fix_dates": bool(AdvancedCleaner),
+            "optimize_memory": bool(AdvancedCleaner),
+            "impute_text": bool(AdvancedCleaner),
+            "auto_drop_low_variance": False,
         },
         "audit_trail": None,
         "advanced_log": {},
+        "audit_trail_obj": None,
+        "median_imputed_cells": [],
+        "green_coordinates": [],
+        "yellow_coordinates": [],
+        "red_coordinates": [],
+        "outlier_coords": [],
+        "text_imputation_mask": None,  # NEW: Boolean DataFrame for imputed text cells
+        "sidebar_visible": True,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1712,7 +1183,13 @@ def _is_date_column(series: pd.Series) -> bool:
         "created_at", "updated_at", "birth_date",
     ]
     col_lower = str(series.name).lower()
+    identifier_kws = [
+        "id", "order id", "orderid", "order_no", "order no", "order number",
+        "رقم", "رقم الطلب", "رقم الطلبية", "كود", "sku", "barcode", "token", "code",
+        "uid", "user id",
+    ]
     if any(k in col_lower for k in date_kws): return True
+    if any(k in col_lower for k in identifier_kws): return False
     if series.dtype == object:
         non_null = series.dropna().astype(str)
         non_null = non_null[~non_null.str.lower().isin(MISSING_VALUES)]
@@ -1841,87 +1318,39 @@ def _arabic_english_normalization_pass(df: pd.DataFrame) -> None:
             )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ████████████  SMART INFERENCE — BILINGUAL  ██████████████████████████████████
-# ═══════════════════════════════════════════════════════════════════════════════
-# كلمات مفتاحية بالعربي والإنجليزي
-INFER_KEYWORDS = {
-    # أثاث / Furniture
-    "سرير": "أثاث",    "bed": "Furniture",
-    "كنبة": "أثاث",    "sofa": "Furniture",
-    "أريكة": "أثاث",   "couch": "Furniture",
-    "طاولة": "أثاث",   "table": "Furniture",
-    "كرسي": "أثاث",    "chair": "Furniture",
-    "خزانة": "أثاث",   "wardrobe": "Furniture",
-    "رف": "أثاث",      "shelf": "Furniture",
-    "مكتب": "أثاث",    "desk": "Furniture",
-    # إلكترونيات / Electronics
-    "ثلاجة": "إلكترونيات",    "refrigerator": "Electronics",
-    "غسالة": "إلكترونيات",    "washing machine": "Electronics",
-    "تلفزيون": "إلكترونيات",  "television": "Electronics",
-    "هاتف": "إلكترونيات",     "phone": "Electronics",
-    "لابتوب": "إلكترونيات",   "laptop": "Electronics",
-    "شاشة": "إلكترونيات",     "monitor": "Electronics",
-    "طابعة": "إلكترونيات",    "printer": "Electronics",
-    "كاميرا": "إلكترونيات",   "camera": "Electronics",
-    "سماعة": "إلكترونيات",    "headphone": "Electronics",
-    # ديكور / Decoration
-    "مصباح": "ديكور",   "lamp": "Decoration",
-    "ثريا": "ديكور",    "chandelier": "Decoration",
-    "لوحة": "ديكور",    "painting": "Decoration",
-    "مرآة": "ديكور",    "mirror": "Decoration",
-    "سجادة": "ديكور",   "carpet": "Decoration",
-    "ستارة": "ديكور",   "curtain": "Decoration",
-    # ملابس / Clothes
-    "قميص": "ملابس",    "shirt": "Clothes",
-    "بنطلون": "ملابس",  "pants": "Clothes",
-    "فستان": "ملابس",   "dress": "Clothes",
-    "حذاء": "ملابس",    "shoes": "Clothes",
-    "حقيبة": "ملابس",   "bag": "Clothes",
-}
 
-def _smart_infer_bilingual(df: pd.DataFrame) -> int:
-    """استنتاج ذكي ثنائي اللغة"""
-    cat_col = desc_col = None
-    dk = ["description","وصف","desc","تفاصيل","details","وصف المنتج","product description"]
-    ck = ["category","فئة","تصنيف","cat","الفئة","نوع","type","قسم","department","cat"]
-
-    for col in df.columns:
-        cl = col.lower().strip()
-        if not desc_col and any(k in cl for k in dk): desc_col = col
-        if not cat_col  and any(k in cl for k in ck): cat_col  = col
-
-    if not (cat_col and desc_col):
-        obj = [c for c in df.select_dtypes(include=["object","string"]).columns
-               if not c.startswith("__")]
-        if len(obj) >= 2:
-            ml = {c: df[c].dropna().astype(str).str.len().mean() for c in obj}
-            uc = {c: df[c].nunique() for c in obj}
-            desc_col = max(ml, key=ml.get)
-            rest = [c for c in obj if c != desc_col]
-            if rest:
-                cat_col = min(rest, key=lambda c: uc.get(c, 0))
-
-    if not (cat_col and desc_col):
-        return 0
-
+def _standardize_majority_words(df: pd.DataFrame) -> int:
+    """Standardize spelling variations to the dominant word in each text column."""
     fixed = 0
-    for idx in df.index:
-        if _is_missing(df.at[idx, cat_col]):
-            desc = df.at[idx, desc_col]
-            if pd.isna(desc) or not isinstance(desc, str):
+    for col in df.select_dtypes(include=["object", "string"]).columns:
+        if col.startswith("__"): continue
+        values = df[col].dropna().astype(str).str.strip()
+        values = values[~values.str.lower().isin(MISSING_VALUES)]
+        if values.empty:
+            continue
+        mode_vals = values.mode()
+        if mode_vals.empty:
+            continue
+        majority_word = str(mode_vals.iloc[0]).strip()
+        if not majority_word:
+            continue
+
+        for idx, raw_val in df[col].items():
+            if pd.isna(raw_val) or not isinstance(raw_val, str):
                 continue
-            desc_lower = desc.lower()
-            for keyword, category in INFER_KEYWORDS.items():
-                if keyword.lower() in desc_lower:
-                    df.at[idx, cat_col] = category
-                    fixed += 1
-                    break
+            cell = raw_val.strip()
+            if not cell or cell == majority_word or cell.lower() in MISSING_VALUES:
+                continue
+            ratio = difflib.SequenceMatcher(None, cell, majority_word).ratio()
+            if ratio >= 0.85:
+                df.at[idx, col] = majority_word
+                fixed += 1
     return fixed
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ████████████  PROFILING ENGINE  █████████████████████████████████████████████
+# STYLER - OPTIMIZED FOR LARGE DATASETS
+# ═══════════════════════════════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════════════
 def _detect_type(s: pd.Series) -> str:
     if pd.api.types.is_bool_dtype(s):            return "boolean"
@@ -2058,12 +1487,13 @@ def _flag_outliers(df, columns=None):
     mask = pd.Series([False]*len(df), index=df.index)
     cnt  = 0
     
-    # If no columns selected, don't flag any outliers
+    # If no columns provided, default to all numeric columns (fully generic)
     if columns is None or len(columns) == 0:
-        df["__outlier__"] = mask
-        return df, cnt
-    
-    # Only check the selected columns
+        columns = df.select_dtypes(include=["number"]).columns.tolist()
+
+    coords = []
+
+    # Only check the provided columns
     for col in columns:
         if col.startswith("__"): continue
         if col not in df.columns: continue
@@ -2074,10 +1504,13 @@ def _flag_outliers(df, columns=None):
             iqr = q3 - q1
             if iqr == 0: continue
             m   = ((num < q1-1.5*iqr) | (num > q3+1.5*iqr)) & num.notna()
-            cnt += int(m.sum()); mask = mask | m
+            if m.any():
+                cnt += int(m.sum())
+                coords.extend((idx, col) for idx in df.index[m])
+                mask = mask | m
         except Exception: continue
     df["__outlier__"] = mask
-    return df, cnt
+    return df, cnt, coords
 
 def _std_types(df):
     cnt  = 0
@@ -2102,54 +1535,180 @@ def _std_types(df):
                 cnt += 1
     return df, cnt
 
+def _infer_imputation_guides(df: pd.DataFrame):
+    columns = list(df.columns)
+    fine_priority = [
+        "item name", "product name", "item", "product", "sku", "variant", "model",
+        "item_id", "product_id", "title",
+    ]
+    coarse_priority = [
+        "category", "department", "segment", "group", "type", "class", "family",
+        "category name", "department name",
+    ]
+
+    def choose(priorities):
+        for pat in priorities:
+            for col in columns:
+                if col.lower() == pat or pat in col.lower():
+                    return col
+        return None
+
+    return choose(fine_priority), choose(coarse_priority)
+
+
 def _fill_missing(df):
     """
     ملء القيم الناقصة بذكاء:
-    - أعمدة رقمية → الوسيط (Median) للحفاظ على الطابع الرقمي والمعادلات
-    - أعمدة عربية → 'غير محدد'
-    - أعمدة إنجليزية → 'Not Specified'
-    - أعمدة مختلطة → 'غير محدد / Not Specified'
+    - معلومات رقمية ونصية → محرك ملء متقدم يعتمد على السياق
+    - يحتفظ بكل القيم الأصلية ويضيف أعمدة حالة التنبؤ لكل عمود
     """
+    median_imputed = []
+    text_missing = []
+
+    if AdvancedCleaner and universal_missing_value_imputation:
+        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+        categorical_cols = df.select_dtypes(include=["object", "string", "category"]).columns.tolist()
+        fine, coarse = _infer_imputation_guides(df)
+
+        if fine and coarse and (numeric_cols or categorical_cols):
+            df_orig = df.copy()
+            try:
+                df = universal_missing_value_imputation(
+                    df.copy(),
+                    numeric_cols_to_fill=numeric_cols,
+                    categorical_cols_to_fill=categorical_cols,
+                    fine_grain_guide=fine,
+                    coarse_grain_guide=coarse,
+                )
+
+                for col in numeric_cols:
+                    if col in df.columns:
+                        missing_mask = df_orig[col].isna() & df[col].notna()
+                        median_imputed.extend((idx, col) for idx in df_orig.index[missing_mask])
+
+                for col in categorical_cols:
+                    if col in df.columns:
+                        missing_mask = df_orig[col].isna() & df[col].notna()
+                        text_missing.extend((idx, col) for idx in df_orig.index[missing_mask])
+
+                return df, median_imputed, text_missing
+            except Exception as e:
+                logger.warning("Advanced universal_missing_value_imputation failed: %s", e)
+
     for col in df.columns:
         if col.startswith("__"): continue
-        
+
         if pd.api.types.is_numeric_dtype(df[col]):
-            # ملء الأعمدة الرقمية بالوسيط
-            non_null = df[col].dropna()
-            if len(non_null) > 0:
-                filler = float(non_null.median())
-            else:
-                filler = 0.0
-            df[col] = df[col].fillna(filler)
-        elif pd.api.types.is_string_dtype(df[col]) or df[col].dtype == object:
-            # ملء الأعمدة النصية حسب اللغة
-            col_lang = detect_column_language(df[col])
-            if col_lang == "en":
-                filler = "Not Specified"
-            elif col_lang == "mixed":
-                filler = "غير محدد / Not Specified"
-            else:
-                filler = "غير محدد"
-            df[col] = df[col].fillna(filler)
-            df[col] = df[col].replace(r"^\s*$", filler, regex=True)
-            
+            missing_mask = df[col].isna()
+            if missing_mask.any():
+                non_null = df[col].dropna()
+                if len(non_null) > 0:
+                    median_val = non_null.median()
+                    if not pd.isna(median_val):
+                        df.loc[missing_mask, col] = median_val
+                        median_imputed.extend((idx, col) for idx in df.index[missing_mask])
+            continue
+
+        if pd.api.types.is_string_dtype(df[col]) or df[col].dtype == object:
+            df[col] = _drop_blank_strings_for_text(df, col)
+            missing_mask = df[col].isna()
+            if missing_mask.any():
+                df.loc[missing_mask, col] = "غير محدد"
+                text_missing.extend((idx, col) for idx in df.index[missing_mask])
+            continue
+
+    return df, median_imputed, text_missing
+
+
+def context_aware_hierarchical_impute_numeric(
+    df: pd.DataFrame,
+    target_numeric_col: str,
+    fine_grain_col: str,
+    coarse_grain_col: str,
+) -> pd.DataFrame:
+    """Impute missing numeric values with context-aware hierarchical logic.
+
+    This function fills missing values in `target_numeric_col` using a strict waterfall:
+      1. Item median grouped by `fine_grain_col`.
+      2. Category median grouped by `coarse_grain_col`.
+      3. Global median across `target_numeric_col`.
+
+    The returned DataFrame includes a tracking column named
+    `f"{target_numeric_col}_imputation_status"`.
+    """
+    if target_numeric_col not in df.columns:
+        raise KeyError(f"Missing target column: {target_numeric_col}")
+    if fine_grain_col not in df.columns:
+        raise KeyError(f"Missing fine-grain column: {fine_grain_col}")
+    if coarse_grain_col not in df.columns:
+        raise KeyError(f"Missing coarse-grain column: {coarse_grain_col}")
+
+    df = df.copy()
+    status_col = f"{target_numeric_col}_imputation_status"
+
+    numeric_target = pd.to_numeric(df[target_numeric_col], errors="coerce")
+    df[status_col] = "Original Value"
+
+    missing_mask = numeric_target.isna()
+    if not missing_mask.any():
+        df[target_numeric_col] = numeric_target
+        return df
+
+    item_median = numeric_target.groupby(df[fine_grain_col]).transform("median")
+    category_median = numeric_target.groupby(df[coarse_grain_col]).transform("median")
+    global_median = numeric_target.median()
+
+    fill_item = missing_mask & item_median.notna()
+    if fill_item.any():
+        numeric_target.loc[fill_item] = item_median.loc[fill_item]
+        df.loc[fill_item, status_col] = "Filled by Item Median"
+
+    still_missing = missing_mask & numeric_target.isna()
+    fill_category = still_missing & category_median.notna()
+    if fill_category.any():
+        numeric_target.loc[fill_category] = category_median.loc[fill_category]
+        df.loc[fill_category, status_col] = "Filled by Category Median"
+
+    still_missing = missing_mask & numeric_target.isna()
+    if still_missing.any() and pd.notna(global_median):
+        numeric_target.loc[still_missing] = global_median
+        df.loc[still_missing, status_col] = "Filled by Global Median"
+
+    df[target_numeric_col] = numeric_target
     return df
+
+
+def streamlit_highlight_item_median_rows(df: pd.DataFrame, target_numeric_col: str) -> object:
+    """Return a Styler that highlights rows filled by item median."""
+    status_col = f"{target_numeric_col}_imputation_status"
+    if status_col not in df.columns:
+        raise KeyError(f"Tracking column not found: {status_col}")
+
+    def _highlight(row):
+        if row[status_col] == "Filled by Item Median":
+            return ["background-color: rgba(46, 204, 113, 0.2);" for _ in row]
+        return ["" for _ in row]
+
+    return df.style.apply(_highlight, axis=1)
+
 
 def run_cleaning():
     import time
     start_time = time.time()
     df  = st.session_state.df.copy()
+    df  = enforce_strict_numeric_candidates(df)
     log = []
     rb  = len(df)
     qs  = _quality_score(df)
     audit_trail = AuditTrail() if AdvancedCleaner else None
+    st.session_state["audit_trail_obj"] = audit_trail  # Persist for subsequent operations and display
     adv_opts = st.session_state.get("advanced_options", {})
 
     # 1. حذف أعمدة مكررة
     df, dc = _remove_dup_cols(df)
     log.append(f"حذف {dc} عمود مكرر | Removed {dc} duplicate columns")
 
-    # ─── 1.1 الكشف الذكي وحذف الأعمدة شبه الفارغة أو عديمة التباين ───
+    # ─── 1.1 الكشف الذكي عن الأعمدة ذات التباين المنخفض أو المفقودة ───
     cols_to_drop = []
     dropped_reasons = []
     for col in df.columns:
@@ -2175,11 +1734,13 @@ def run_cleaning():
                 if most_freq_pct > 0.98 and len(nn) > 1:
                     cols_to_drop.append(col)
                     dropped_reasons.append(f"عمود ذو تباين منخفض {col} ({most_freq_pct*100:.1f}% قيمة مكررة) | low-variance column {col} ({most_freq_pct*100:.1f}% identical value)")
-                    
-    if cols_to_drop:
+
+    if adv_opts.get("auto_drop_low_variance", False) and cols_to_drop:
         df.drop(columns=cols_to_drop, inplace=True)
         for reason in dropped_reasons:
             log.append(f"حذف تلقائي: {reason}")
+    elif cols_to_drop:
+        log.append("⚠️ تم العثور على أعمدة محتملة للحذف بسبب القيم الناقصة أو التباين المنخفض، لكنها لم تُحذف لأن خيار الحذف التلقائي غير مفعل.")
 
     # 2. تنظيف المسافات
     _strip_ws(df)
@@ -2199,33 +1760,54 @@ def run_cleaning():
     # ─── ADVANCED: تنظيف الأرقام المخلوطة ───
     if adv_opts.get("clean_numeric", False) and AdvancedCleaner:
         try:
+            before_numeric = df.copy()
             df, num_log = clean_numeric_columns(df)
             if num_log.get("columns_cleaned", 0) > 0:
                 log.append(f"✨ تنظيف الأرقام: {num_log['values_converted']} | Numeric cleaning: {num_log['values_converted']}")
                 if audit_trail:
-                    audit_trail.log_bulk_change(num_log['values_converted'], "Mixed numeric/text cleaning")
+                    log_dataframe_changes(
+                        audit_trail,
+                        before_numeric,
+                        df,
+                        cols=before_numeric.columns.tolist(),
+                        reason="Clean Mixed Numbers / تنظيف الأرقام المخلوطة"
+                    )
         except Exception as e:
             log.append(f"⚠️ خطأ في تنظيف الأرقام: {str(e)}")
 
     # ─── ADVANCED: الدمج الذكي للمتشابهات ───
     if adv_opts.get("fuzzy_match", False) and AdvancedCleaner:
         try:
+            before_fuzzy = df.copy()
             df, fuzzy_log = apply_fuzzy_matching(df, threshold=90)
             if fuzzy_log.get("total_changes", 0) > 0:
                 log.append(f"✨ الدمج الذكي: {fuzzy_log['total_changes']} | Fuzzy matching: {fuzzy_log['total_changes']}")
                 if audit_trail:
-                    audit_trail.log_bulk_change(fuzzy_log['total_changes'], "Fuzzy matching for similar values")
+                    log_dataframe_changes(
+                        audit_trail,
+                        before_fuzzy,
+                        df,
+                        cols=before_fuzzy.columns.tolist(),
+                        reason="Fuzzy matched text / تم دمج القيمة المتشابهة"
+                    )
         except Exception as e:
             log.append(f"⚠️ خطأ في الدمج الذكي: {str(e)}")
 
     # 3. إصلاح التواريخ (العادي أو المتقدم)
     if adv_opts.get("fix_dates", False) and AdvancedCleaner:
         try:
+            before_dates = df.copy()
             df, dates_log = clean_dates_advanced(df)
             dates = dates_log.get("dates_fixed", 0)
             log.append(f"✨ تصحيح التواريخ المتقدم: {dates} | Advanced date fixing: {dates}")
             if audit_trail:
-                audit_trail.log_bulk_change(dates, "Advanced date validation and fixing")
+                log_dataframe_changes(
+                    audit_trail,
+                    before_dates,
+                    df,
+                    cols=before_dates.columns.tolist(),
+                    reason="Advanced Date Validation / التحقق المتقدم من التواريخ"
+                )
         except Exception as e:
             log.append(f"⚠️ خطأ في تصحيح التواريخ: {str(e)}")
             df, dates = fix_date_columns(df)
@@ -2238,84 +1820,37 @@ def run_cleaning():
     _arabic_english_normalization_pass(df)
     log.append("تطبيع النصوص العربية والإنجليزية | AR+EN text normalized")
 
-    # 5. استنتاج ذكي ثنائي اللغة
-    cells = _smart_infer_bilingual(df)
-    log.append(f"استنتاج ذكي: {cells} خلية | Smart inference: {cells} cells")
+    # 4.1 توحيد الكلمات السائدة في الأعمدة النصية باستخدام أغلبية القيم
+    std_cells = _standardize_majority_words(df)
+    cells = std_cells
+    if std_cells > 0:
+        log.append(f"✨ توحيد الكلمات السائدة: {std_cells} خلية | Majority word standardization: {std_cells} cells")
 
-    # ─── AI DEEP CLEANING (OPTIONAL) ───
-    ai_cells = 0
-    if Groq and 'Status' in df.columns and can_use_ai():
-        try:
-            df, ai_cells = apply_ai_cleaning(df)
-            if ai_cells > 0:
-                log.append(f"✨ تنظيف ذكي بالذكاء الاصطناعي: {ai_cells} خلية | AI deep clean: {ai_cells} cells")
-        except Exception as e:
-            log.append(f"⚠️ خطأ في التنظيف بالذكاء الاصطناعي: {str(e)}")
+    # Note: removed header/keyword-based inference to keep pipeline schema-agnostic
+
+    smart_cells = 0
 
     # 6. توحيد الأنواع
     df, types = _std_types(df)
     log.append(f"توحيد الأنواع: {types} عمود | Type standardization: {types} cols")
 
-    # 7. رصد الشاذات (MANUAL SELECTION)
+    # 7. رصد الشاذات (آلي - يتم تطبيقه على كل الأعمدة الرقمية)
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    text_cols = df.select_dtypes(include=["object", "string", "category"]).columns.tolist()
+
+    st.session_state["green_coordinates"] = _collect_missing_numeric_coords(df, numeric_cols)
+    st.session_state["red_coordinates"] = _collect_missing_text_coords(df, text_cols)
+
     selected_cols = st.session_state.get("selected_outlier_columns", [])
-    df, outl = _flag_outliers(df, columns=selected_cols)
-    if len(selected_cols) > 0:
-        log.append(f"رصد {outl} قيمة شاذة في {len(selected_cols)} أعمدة | {outl} outliers flagged in {len(selected_cols)} columns")
+    cols_for_outliers = selected_cols if selected_cols else None
+    df, outl, outlier_coords = _flag_outliers(df, columns=cols_for_outliers)
+    st.session_state["yellow_coordinates"] = list(outlier_coords)
+    st.session_state["outlier_coords"] = list(outlier_coords)
+    if outl > 0:
+        cols_flagged = len(set(c for _, c in outlier_coords))
+        log.append(f"رصد {outl} قيمة شاذة في {cols_flagged} أعمدة رقمية | {outl} outliers flagged across {cols_flagged} numeric columns")
     else:
-        log.append("⚠️ لم تُختر أعمدة للكشف عن الشاذات | No columns selected for outlier detection")
-
-    # ─── 7.1 التحقق المتقدم من تداخل البيانات وتوافقها منطقياً ───
-    logical_price_count = 0
-    for col in df.columns:
-        if col.startswith("__"): continue
-        col_lower = col.lower()
-        if any(k in col_lower for k in ["price", "cost", "amount", "سعر", "تكلفة", "قيمة"]):
-            try:
-                num_vals = pd.to_numeric(df[col], errors="coerce")
-                invalid_price_mask = (num_vals <= 0) & num_vals.notna()
-                if invalid_price_mask.any():
-                    if "__outlier__" not in df.columns:
-                        df["__outlier__"] = pd.Series([False]*len(df), index=df.index)
-                    df.loc[invalid_price_mask, "__outlier__"] = True
-                    logical_price_count += int(invalid_price_mask.sum())
-            except:
-                pass
-    if logical_price_count > 0:
-        log.append(f"أخطاء منطقية بالأسعار: تم رصد {logical_price_count} قيمة سعرية <= 0 وتأشيرها | Pricing integrity: flagged {logical_price_count} rows with price/cost <= 0")
-
-    conflict_count = 0
-    date_cols = []
-    for col in df.columns:
-        if col.startswith("__"): continue
-        col_lower = col.lower()
-        if any(k in col_lower for k in ["date", "time", "تاريخ", "طلب", "شحن", "تسليم", "order", "delivery", "ship"]):
-            date_cols.append(col)
-            
-    order_col = None
-    delivery_col = None
-    for col in date_cols:
-        col_lower = col.lower()
-        if any(k in col_lower for k in ["order", "طلب"]):
-            order_col = col
-        elif any(k in col_lower for k in ["delivery", "ship", "تسليم", "شحن"]):
-            delivery_col = col
-            
-    if order_col and delivery_col:
-        try:
-            o_dates = pd.to_datetime(df[order_col], errors="coerce")
-            d_dates = pd.to_datetime(df[delivery_col], errors="coerce")
-            conflict_mask = (d_dates < o_dates) & o_dates.notna() & d_dates.notna()
-            if conflict_mask.any():
-                if "__outlier__" not in df.columns:
-                    df["__outlier__"] = pd.Series([False]*len(df), index=df.index)
-                df.loc[conflict_mask, "__outlier__"] = True
-                conflict_count = int(conflict_mask.sum())
-                log.append(f"تداخل التواريخ: تم رصد {conflict_count} تعارض بين {order_col} و {delivery_col} وتأشيرها | Date integrity: flagged {conflict_count} rows where {delivery_col} is before {order_col}")
-        except:
-            pass
-            
-    # زيادة العداد الإجمالي للشواذ ليشمل التعارضات المنطقية
-    outl += logical_price_count + conflict_count
+        log.append("لا توجد قيم شاذة رقمية مرصودة | No numeric outliers detected")
 
     # 8. حذف مكررات
     df.drop_duplicates(
@@ -2325,9 +1860,40 @@ def run_cleaning():
     ra = len(df)
     log.append(f"حذف {rb-ra} صف مكرر | Removed {rb-ra} duplicate rows")
 
-    # 9. ملء الفراغات بذكاء (عربي/إنجليزي)
-    df = _fill_missing(df)
-    log.append("ملء القيم الفارغة بذكاء | Smart fill (AR/EN)")
+    # 9. ملء الفراغات بذكاء
+    df, median_imputed, text_missing = _fill_missing(df)
+    # Drop internal imputation tracking columns before output/export
+    status_cols = [c for c in df.columns if str(c).endswith("_imputation_status")]
+    if status_cols:
+        df = df.drop(columns=status_cols, errors="ignore")
+
+    st.session_state["median_imputed_cells"] = list(median_imputed)
+    st.session_state["green_coordinates"] = list(median_imputed)
+    st.session_state["red_coordinates"] = list(text_missing)
+    log.append("ملء القيم الفارغة بذكاء | Smart fill")
+
+    # ─── NEW: DYNAMIC CONTEXTUAL TEXT IMPUTATION ───
+    text_imputation_mask = pd.DataFrame(False, index=df.index, columns=df.columns)
+    if adv_opts.get("impute_text", False) and AdvancedCleaner:
+        try:
+            from core.text_processor import dynamic_contextual_text_imputation
+            before_text_impute = df.copy()
+            df, text_imputation_mask = dynamic_contextual_text_imputation(df)
+            imputation_count = int(text_imputation_mask.sum().sum())
+            if imputation_count > 0:
+                log.append(f"✨ استنتاج نصوص سياقي: {imputation_count} خلية | Dynamic contextual text imputation: {imputation_count} cells")
+                if audit_trail:
+                    log_dataframe_changes(
+                        audit_trail,
+                        before_text_impute,
+                        df,
+                        cols=before_text_impute.columns.tolist(),
+                        reason="Dynamic Contextual Text Imputation / استنتاج النصوص السياقي"
+                    )
+            st.session_state["text_imputation_mask"] = text_imputation_mask
+        except Exception as e:
+            log.append(f"⚠️ خطأ في استنتاج النصوص السياقي: {str(e)[:80]}")
+            st.session_state["text_imputation_mask"] = None
 
     # ─── ADVANCED: تحسين الذاكرة ───
     mem_log = {}
@@ -2347,7 +1913,7 @@ def run_cleaning():
     st.session_state.update({
         "df": df, "cleaning_done": True, "step": 4,
         "cleaning_time": elapsed_time,
-        "rows_deleted": rb-ra, "cells_fixed": cells + ai_cells,
+        "rows_deleted": rb-ra, "cells_fixed": cells + smart_cells,
         "dates_fixed": dates, "dup_cols_removed": dc,
         "rows_before": rb, "rows_after": ra,
         "outliers_flagged": outl, "types_fixed": types,
@@ -2403,6 +1969,50 @@ def read_file(uploaded_file) -> pd.DataFrame:
     return read_file_cached(uploaded_file.name, uploaded_file.getvalue())
 
 
+NUMERIC_FIELD_KEYWORDS = [
+    "price", "amount", "total", "cost", "fee", "tax", "value",
+    "balance", "sum", "subtotal", "net", "gross", "paid", "charge",
+    "invoice", "discount", "salary", "commission", "budget",
+]
+ARABIC_NUMERIC_FIELD_KEYWORDS = [
+    "سعر", "مبلغ", "تكلفة", "قيمة", "إجمالي", "المجموع", "رصيد",
+    "دفع", "فاتورة", "ضريبة", "رسوم", "صاف", "دفعة",
+]
+
+def _is_financial_column_name(col_name: str) -> bool:
+    lower = str(col_name).lower()
+    return any(keyword in lower for keyword in NUMERIC_FIELD_KEYWORDS) or any(keyword in lower for keyword in ARABIC_NUMERIC_FIELD_KEYWORDS)
+
+
+def enforce_strict_numeric_candidates(df: pd.DataFrame) -> pd.DataFrame:
+    for col in df.columns:
+        if _is_financial_column_name(col):
+            coerced = pd.to_numeric(df[col], errors="coerce")
+            if coerced.notna().eq(df[col].notna()).all():
+                df[col] = coerced
+    return df
+
+
+def _collect_missing_numeric_coords(df: pd.DataFrame, cols) -> list:
+    return [(idx, col) for col in cols for idx in df.index[df[col].isna()]]
+
+
+def _collect_missing_text_coords(df: pd.DataFrame, cols) -> list:
+    coords = []
+    for col in cols:
+        mask = df[col].isna() | df[col].astype(str).str.strip().eq("")
+        for idx in df.index[mask]:
+            coords.append((idx, col))
+    return coords
+
+
+def _drop_blank_strings_for_text(df: pd.DataFrame, col: str) -> pd.Series:
+    series = df[col]
+    if pd.api.types.is_string_dtype(series) or series.dtype == object:
+        return series.where(~series.astype(str).str.strip().eq(""), np.nan)
+    return series
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ████████████  EXPORT ENGINE  ████████████████████████████████████████████████
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2419,7 +2029,7 @@ def _safe_export_convert(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def export_excel(df: pd.DataFrame) -> bytes:
-    de   = _safe_export_convert(df)
+    de = _safe_export_convert(df)
     oflg = de.pop("__outlier__") if "__outlier__" in de.columns else None
 
     date_cols = {
@@ -2427,148 +2037,118 @@ def export_excel(df: pd.DataFrame) -> bytes:
         if not col.startswith("__") and _is_date_column(df[col])
     }
 
-    # تحديد اللغة السائدة لكل عمود
+    red_coords = set(tuple(c) for c in st.session_state.get("red_coordinates", []))
+    green_coords = set(tuple(c) for c in st.session_state.get("green_coordinates", []))
+    yellow_coords = set(tuple(c) for c in st.session_state.get("yellow_coordinates", []))
+    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
     col_langs = {}
     for col in df.columns:
         if col.startswith("__"): continue
         col_langs[col] = detect_column_language(df[col])
 
-    de = de.astype(str)
-    de = de.replace({"nan":"","<NA>":"","None":""})
-
-    for col in df.columns:
-        if col.startswith("__") or col in date_cols: continue
-        try:
-            de[col] = pd.to_numeric(df[col], errors="raise")
-        except Exception:
-            pass
-
     out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="xlsxwriter") as wr:
-        sname = "Cleaned Data | البيانات المنظفة"
-        de.to_excel(wr, sheet_name=sname, index=False)
-        wb = wr.book
-        ws = wr.sheets[sname]
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Cleaned Data | البيانات المنظفة"
 
-        # Formats
-        hdr_fmt = wb.add_format({
-            "bold": True, "font_color": "#FFFFFF",
-            "bg_color": "#1D4ED8", "border": 1,
-            "align": "center", "valign": "vcenter",
-            "text_wrap": True, "font_size": 11,
-        })
-        cell_fmt_ar = wb.add_format({
-            "border": 1, "align": "right", "valign": "vcenter",
-            "font_size": 10,
-        })
-        cell_fmt_en = wb.add_format({
-            "border": 1, "align": "left", "valign": "vcenter",
-            "font_size": 10,
-        })
-        cell_fmt_mixed = wb.add_format({
-            "border": 1, "align": "center", "valign": "vcenter",
-            "font_size": 10,
-        })
-        date_fmt = wb.add_format({
-            "border": 1, "align": "center", "valign": "vcenter",
-            "font_size": 10, "num_format": "@",
-            "font_color": "#1D4ED8",
-        })
-        # تلوين "غير محدد"
-        miss_ar_fmt = wb.add_format({
-            "bg_color": "#FEE2E2", "font_color": "#991B1B",
-            "border": 1, "align": "right", "valign": "vcenter",
-            "bold": True, "font_size": 10,
-        })
-        # تلوين "Not Specified"
-        miss_en_fmt = wb.add_format({
-            "bg_color": "#FEE2E2", "font_color": "#991B1B",
-            "border": 1, "align": "left", "valign": "vcenter",
-            "bold": True, "font_size": 10,
-        })
-        # تلوين القيم المختلطة الناقصة
-        miss_mixed_fmt = wb.add_format({
-            "bg_color": "#FEE2E2", "font_color": "#991B1B",
-            "border": 1, "align": "center", "valign": "vcenter",
-            "bold": True, "font_size": 10,
-        })
-        outl_fmt = wb.add_format({
-            "bg_color": "#FEF3C7", "font_color": "#92400E",
-            "border": 1, "align": "right", "valign": "vcenter",
-            "font_size": 10,
-        })
-        num_fmt = wb.add_format({
-            "border": 1, "align": "right", "valign": "vcenter",
-            "num_format": "#,##0.##", "font_size": 10,
-        })
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(fill_type="solid", fgColor="1D4ED8")
+    border = Border(
+        left=Side(style="thin", color="D1D5DB"),
+        right=Side(style="thin", color="D1D5DB"),
+        top=Side(style="thin", color="D1D5DB"),
+        bottom=Side(style="thin", color="D1D5DB"),
+    )
+    align_right = Alignment(horizontal="right", vertical="center", wrap_text=True)
+    align_left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    align_center = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        # أعمدة وعرض
-        for i, col in enumerate(de.columns):
+    missing_fill = PatternFill(fill_type="solid", fgColor="F8D7DA")
+    outlier_fill = PatternFill(fill_type="solid", fgColor="FFF3CD")
+    median_fill = PatternFill(fill_type="solid", fgColor="D4EDDA")
+
+    for ci, col in enumerate(de.columns, start=1):
+        header = ws.cell(row=1, column=ci, value=col)
+        header.font = header_font
+        header.fill = header_fill
+        header.alignment = align_center
+        header.border = border
+        width = min(max(
+            de[col].astype(str).fillna("").apply(lambda x: len(str(x))).max() if len(de) > 0 else 10,
+            len(str(col))
+        ) + 4, 45)
+        ws.column_dimensions[get_column_letter(ci)].width = width
+
+    for ri, idx in enumerate(de.index, start=2):
+        actual_idx = df.index[ri - 2]
+        for ci, col in enumerate(de.columns, start=1):
+            raw_val = de.at[idx, col]
+            coord = (actual_idx, col)
+            is_missing_text = coord in red_coords
+            is_median = coord in green_coords
+            is_outlier = coord in yellow_coords
             lang = col_langs.get(col, "ar")
+
+            cell = ws.cell(row=ri, column=ci)
+            cell.border = border
             if col in date_cols:
-                base = date_fmt
+                cell.alignment = align_center
             elif lang == "en":
-                base = cell_fmt_en
+                cell.alignment = align_left
             elif lang == "mixed":
-                base = cell_fmt_mixed
+                cell.alignment = align_center
             else:
-                base = cell_fmt_ar
+                cell.alignment = align_right
 
-            w = min(max(
-                de[col].astype(str).str.len().max() if len(de)>0 else 10,
-                len(str(col))
-            ) + 4, 45)
-            ws.set_column(i, i, w, base)
-            ws.write(0, i, col, hdr_fmt)
+            if is_median:
+                cell.fill = median_fill
+            elif is_outlier:
+                cell.fill = outlier_fill
+            elif is_missing_text:
+                cell.fill = missing_fill
 
-        # كتابة خلية بخلية
-        MISS_VALS_SET = {"غير محدد", "Not Specified",
-                         "غير محدد / Not Specified"}
+            if is_missing_text:
+                cell.value = "غير محدد"
+                cell.number_format = "@"
+                continue
 
-        for ri, (idx, row) in enumerate(de.iterrows(), start=1):
-            is_out = bool(oflg.iloc[ri-1]) if oflg is not None else False
-            for ci, col in enumerate(de.columns):
-                str_val = str(row[col]).strip()
-                if str_val in ("nan","None","NaT","<NA>",""):
-                    str_val = "غير محدد"
+            if col in date_cols:
+                cell.value = "" if pd.isna(raw_val) else str(raw_val)
+                cell.number_format = "@"
+                continue
 
-                lang = col_langs.get(col, "ar")
-
-                # تاريخ
-                if col in date_cols:
-                    ws.write_string(ri, ci, str_val, date_fmt)
-
-                # قيمة ناقصة
-                elif str_val in MISS_VALS_SET:
-                    if lang == "en":
-                        ws.write(ri, ci, str_val, miss_en_fmt)
-                    elif lang == "mixed":
-                        ws.write(ri, ci, str_val, miss_mixed_fmt)
-                    else:
-                        ws.write(ri, ci, str_val, miss_ar_fmt)
-
-                # قيمة شاذة
-                elif is_out:
-                    try:    ws.write_number(ri, ci, float(str_val), outl_fmt)
-                    except: ws.write(ri, ci, str_val, outl_fmt)
-
-                # رقم
+            if col in numeric_cols:
+                if pd.isna(raw_val) or str(raw_val).strip() == "":
+                    cell.value = None
+                elif isinstance(raw_val, (int, np.integer)):
+                    cell.value = int(raw_val)
+                    cell.number_format = "#,##0"
+                elif isinstance(raw_val, (float, np.floating)):
+                    cell.value = float(raw_val)
+                    cell.number_format = "#,##0.##"
                 else:
                     try:
-                        ws.write_number(ri, ci, float(str_val), num_fmt)
-                    except:
-                        if lang == "en":
-                            ws.write(ri, ci, str_val, cell_fmt_en)
-                        elif lang == "mixed":
-                            ws.write(ri, ci, str_val, cell_fmt_mixed)
-                        else:
-                            ws.write(ri, ci, str_val, cell_fmt_ar)
+                        numeric_val = float(str(raw_val))
+                        cell.value = numeric_val
+                        cell.number_format = "#,##0.##"
+                    except Exception:
+                        cell.value = str(raw_val)
+                        cell.number_format = "@"
+                continue
 
-        ws.freeze_panes(1, 0)
-        ws.autofilter(0, 0, len(de), len(de.columns)-1)
-        ws.set_row(0, 38)
-        ws.right_to_left()
+            if pd.isna(raw_val):
+                raw_val = None
 
+            cell.value = raw_val
+            cell.number_format = "@"
+
+    max_col = get_column_letter(len(de.columns))
+    max_row = len(de) + 1
+    ws.auto_filter.ref = f"A1:{max_col}{max_row}"
+    ws.freeze_panes = "A2"
+    ws.sheet_view.rightToLeft = True
+
+    wb.save(out)
     out.seek(0)
     return out.getvalue()
 
@@ -2590,27 +2170,105 @@ def export_csv(df: pd.DataFrame) -> bytes:
 # ═══════════════════════════════════════════════════════════════════════════════
 @st.cache_data
 def _get_style_config():
-    """Cache styling configuration - Professional data highlighting"""
+    """Cache styling configuration"""
     return {
         "MISS_SET": {"غير محدد", "Not Specified", "غير محدد / Not Specified"},
-        "missing_style": "background-color:rgba(239,68,68,0.2);color:#FF6B6B;font-weight:700;border-left:3px solid #EF4444;padding-left:6px;font-family:'Tajawal','Inter',sans-serif;",
-        "outlier_style": "background-color:rgba(245,158,11,0.25);border-left:3px solid #F59E0B;padding-left:6px;",
-        "normal_style": "background-color:rgba(59,130,246,0.08);",
+        "missing_style": "background-color:rgba(248,215,218,0.85);color:#991B1B;font-weight:700;border:1px solid rgba(248,215,218,0.6);",
+        "outlier_style": "background-color:rgba(255,243,205,0.85);",
+        "median_style": "background-color:rgba(212,237,218,0.85);",
+        # NEW: Neon Green for imputed text cells (optimized for dark mode)
+        "imputed_text_style": "background-color:rgba(34,197,94,0.25);border:1.5px solid rgba(34,197,94,0.6);color:#86EFAC;font-weight:600;",
     }
 
-def style_preview(df: pd.DataFrame, preview_only: bool = True, preview_rows: int = 100):
+
+def style_imputed_text_cells(df: pd.DataFrame, imputation_mask: pd.DataFrame, preview_only: bool = True, preview_rows: int = 100):
+    """
+    HIGHLIGHT IMPUTED TEXT CELLS with neon green (dark mode optimized).
+    
+    This function applies a sleek neon green highlight to cells where:
+    - The Dynamic Contextual Text Imputation successfully predicted and filled a missing value.
+    
+    Args:
+        df: Cleaned DataFrame containing the imputed values
+        imputation_mask: Boolean mask DataFrame (True where imputation occurred)
+        preview_only: If True, only style preview rows (RECOMMENDED for large datasets)
+        preview_rows: Number of rows to style (default 100)
+    
+    Returns:
+        Styled DataFrame ready for st.dataframe() display
+    
+    Example usage in Streamlit app:
+        st.subheader("✨ Cleaned Data with AI-Imputed Text Highlighted")
+        styled_df = style_imputed_text_cells(
+            df=cleaned_df,
+            imputation_mask=text_imputation_mask,
+            preview_only=True,
+            preview_rows=100
+        )
+        st.dataframe(styled_df, use_container_width=True, height=500)
+    """
+    try:
+        # Use preview for styling (critical for large data!)
+        if preview_only and len(df) > preview_rows:
+            disp = df.head(preview_rows).copy()
+            mask_disp = imputation_mask.head(preview_rows)
+        else:
+            disp = df.drop(columns=["__outlier__"], errors="ignore")
+            mask_disp = imputation_mask
+        
+        config = _get_style_config()
+
+        def highlight_imputed(data):
+            """Apply neon green highlight to imputed cells."""
+            # data is a Series for each row
+            styles = []
+            for col_name, val in data.items():
+                try:
+                    # Get the mask value for this cell
+                    mask_val = mask_disp.loc[data.name, col_name] if col_name in mask_disp.columns else False
+                    if mask_val:
+                        styles.append(config["imputed_text_style"])
+                    else:
+                        styles.append("")
+                except Exception:
+                    styles.append("")
+            return styles
+
+        return disp.style.apply(highlight_imputed, axis=1)
+
+    except Exception as e:
+        st.warning(f"⚠️ Styling imputed cells: {str(e)[:100]}")
+        # Fallback: return unstyled preview
+        if preview_only and len(df) > preview_rows:
+            return df.head(preview_rows)
+        return df.head(preview_rows)
+
+
+@st.cache_data
+def _get_style_config():
+    """Cache styling configuration"""
+    return {
+        "MISS_SET": {"غير محدد", "Not Specified", "غير محدد / Not Specified"},
+        "missing_style": "background-color:rgba(248,215,218,0.85);color:#991B1B;font-weight:700;border:1px solid rgba(248,215,218,0.6);",
+        "outlier_style": "background-color:rgba(255,243,205,0.85);",
+        "median_style": "background-color:rgba(212,237,218,0.85);",
+    }
+
+def style_preview(df: pd.DataFrame, preview_only: bool = True, preview_rows: int = 100, median_coords=None, outlier_coords=None, missing_coords=None):
     """
     OPTIMIZED: Style only preview rows to avoid Pandas Styler rendering limits
     
     KEY CHANGE: Works on .head(preview_rows) to avoid "14M+ cells" error
-    - Original error: Trying to render entire 1M+ row dataframe
-    - Solution: Render only first 100 rows with styling
+    - Original error: Trying to render only first rows with styling for large datasets
     - Full dataset still processes in background (session state)
     
     Args:
         df: DataFrame (can be 1M+ rows)
         preview_only: If True, only style preview rows (RECOMMENDED)
         preview_rows: Number of rows to style (default 100)
+        median_coords: Iterable of (row_index, column_name) tuples to highlight green.
+        outlier_coords: Iterable of (row_index, column_name) tuples to highlight yellow.
+        missing_coords: Iterable of (row_index, column_name) tuples to highlight red.
     
     Returns:
         Styled DataFrame (safe to render with st.dataframe)
@@ -2623,37 +2281,28 @@ def style_preview(df: pd.DataFrame, preview_only: bool = True, preview_rows: int
             disp = df.drop(columns=["__outlier__"], errors="ignore")
         
         config = _get_style_config()
-        MISS_SET = config["MISS_SET"]
-        has_out = "__outlier__" in df.columns
-        
-        def cell_s(val):
-            if pd.isna(val):
-                return config["missing_style"]
-            if isinstance(val, str) and val.strip() in MISS_SET:
-                return config["missing_style"]
-            return ""
-        
-        if has_out:
-            def row_s(row):
-                try:
-                    # Get outlier status from ORIGINAL df using index mapping
-                    if preview_only and len(df) > preview_rows:
-                        # For preview, check actual row position in full df
-                        actual_idx = df.index[row.name] if isinstance(row.name, int) else row.name
-                        is_o = df.loc[actual_idx, "__outlier__"] if actual_idx in df.index else False
-                    else:
-                        is_o = df.loc[row.name, "__outlier__"]
-                except Exception:
-                    is_o = False
-                
-                if is_o:
-                    return [config["outlier_style"] for _ in row]
-                return [""] * len(row)
-            
-            return disp.style.apply(row_s, axis=1).map(cell_s)
-        
-        return disp.style.map(cell_s)
-    
+        median_coords = set(tuple(c) for c in (median_coords or []))
+        outlier_coords = set(tuple(c) for c in (outlier_coords or []))
+        missing_coords = set(tuple(c) for c in (missing_coords or []))
+
+        def row_s(row):
+            actual_idx = df.index[row.name] if preview_only and len(df) > preview_rows else row.name
+            styles = []
+
+            for col, val in row.items():
+                coord = (actual_idx, col)
+                if coord in median_coords:
+                    styles.append(config["median_style"])
+                elif coord in outlier_coords:
+                    styles.append(config["outlier_style"])
+                elif coord in missing_coords:
+                    styles.append(config["missing_style"])
+                else:
+                    styles.append("")
+            return styles
+
+        return disp.style.apply(row_s, axis=1)
+
     except Exception as e:
         st.warning(f"⚠️ Styling preview: {str(e)[:100]}")
         # Fallback: return unstyled preview
@@ -2668,143 +2317,65 @@ def style_preview(df: pd.DataFrame, preview_only: bool = True, preview_rows: int
 def render_stepper(cur: int):
     steps = [("1","📤","الرفع"),("2","🔍","التحليل"),
              ("3","⚡","التنظيف"),("4","📥","التصدير")]
-    parts = ['<div class="stepper-wrap">']
+    html = '<div class="stepper-wrap">'
     for i,(n,icon,lbl) in enumerate(steps):
         ni = int(n)
-        if ni==cur:   cbg=C['accent'];clbl=C['accent'];ctxt=C['bg'];sh=f"box-shadow:0 0 16px {C['accent']}60;"
-        elif ni<cur:  cbg=C['green']; clbl=C['text2']; ctxt=C['bg'];sh=""
-        else:         cbg=C['bg3'];   clbl=C['text3']; ctxt=C['text3'];sh=""
+        if ni==cur:
+            cbg=C['accent']; clbl=C['accent']; ctxt=C['bg']; sh=f"box-shadow:0 0 16px {C['accent']}60;"
+        elif ni<cur:
+            cbg=C['green']; clbl=C['text2']; ctxt=C['bg']; sh=""
+        else:
+            cbg=C['bg3']; clbl=C['text3']; ctxt=C['text3']; sh=""
         sym = "✓" if ni<cur else (icon if ni==cur else n)
-        parts.append(f"""
+        html += f"""
         <div class="stepper-step">
             <div class="stepper-circle" style="background:{cbg};color:{ctxt};{sh}">{sym}</div>
             <div class="stepper-label" style="color:{clbl};">{lbl}</div>
-        </div>""")
-        if i<len(steps)-1:
-            lc = C['green'] if ni<cur else (C['accent']+"50" if ni==cur else C['border'])
-            parts.append(f'<div class="stepper-line" style="background:{lc};"></div>')
-    parts.append("</div>")
-    st.markdown("".join(parts), unsafe_allow_html=True)
+        </div>"""
+        if i < len(steps) - 1:
+            lc = C['green'] if ni < cur else (C['accent'] + "50" if ni == cur else C['border'])
+            html += f'<div class="stepper-line" style="background:{lc};"></div>'
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
 
 def metric_grid(metrics):
-    """Professional metrics grid with enhanced styling"""
     html = '<div class="metric-grid">'
-    for i, (icon, lbl, val, sub) in enumerate(metrics):
-        # Determine color based on position and value
-        if i == 0:
-            accent_color = C['accent']
-        elif i == 1:
-            accent_color = C['cyan']
-        elif i == 2:
-            accent_color = C['green']
-        else:
-            accent_color = C['accent2']
-            
+    for (icon,lbl,val,sub) in metrics:
         html += f"""
-        <div class="metric-card" style="border-top:3px solid {accent_color};">
+        <div class="metric-card">
             <div class="metric-icon">{icon}</div>
             <div class="metric-label">{lbl}</div>
-            <div class="metric-value" style="color:{accent_color};">{val}</div>
+            <div class="metric-value">{val}</div>
             <div class="metric-sub">{sub}</div>
         </div>"""
     html += "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
 def stage_header(num, title, desc):
-    # Enhanced stage header with progress indicator
-    stages = ["📤 الرفع | Upload", "🔍 التحليل | Analysis", "⚡ التنظيف | Cleaning", "📥 التصدير | Export"]
-    
-    def resolve_stage_number(value):
-        if isinstance(value, (int, float)):
-            return max(1, min(4, int(value)))
-        text = str(value).strip()
-        if not text:
-            return 1
-        digits = re.search(r"\d+", text)
-        if digits:
-            return max(1, min(4, int(digits.group())))
-        arabic_map = {
-            "الأولى": 1, "الأول": 1,
-            "الثانية": 2, "الثاني": 2,
-            "الثالثة": 3, "الثالث": 3,
-            "الرابعة": 4, "الرابع": 4,
-        }
-        first_word = text.split()[0]
-        for key, val in arabic_map.items():
-            if first_word.startswith(key):
-                return val
-        return 1
-    
-    stage_num = resolve_stage_number(num)
-    progress_pct = ((stage_num - 1) / 4) * 100
-    
     st.markdown(f"""
     <div class="stage-header">
-        <div style="display:flex; gap:0.6rem; align-items:center; margin-bottom:0.8rem;">
-            <div class="stage-header-num">▸ المرحلة {num}</div>
-            <div style="font-size:0.75rem; font-weight:700; color:{C['text3']}; text-transform:uppercase; letter-spacing:0.06em;">
-                ({stage_num} من 4)
-            </div>
-        </div>
-        <div style="background:{C['bg3']}; border-radius:8px; height:6px; margin-bottom:1rem; overflow:hidden;">
-            <div style="width:{progress_pct}%; height:100%; background:linear-gradient(90deg,{C['accent']},{C['cyan']}); border-radius:8px; transition:all 0.3s ease;"></div>
-        </div>
+        <div class="stage-header-num">▸ المرحلة {num}</div>
         <div class="stage-header-title">{title}</div>
         <div class="stage-header-desc">{desc}</div>
     </div>""", unsafe_allow_html=True)
 
 def quality_card(score: float, label="مؤشر جودة البيانات", improvement: float = None):
-    """Professional quality card with circular progress indicator"""
-    score = min(max(score, 0), 100)
-    
-    if score >= 85:
-        clr = C['green']
-        badge = "ممتاز | Excellent"
-    elif score >= 65:
-        clr = C['yellow']
-        badge = "جيد | Good"
-    elif score >= 40:
-        clr = "#FF8C00"
-        badge = "مقبول | Fair"
-    else:
-        clr = C['red']
-        badge = "ضعيف | Poor"
-    
-    circumference = 251.2
-    offset = circumference * (1 - score / 100.0)
-    
-    imp_section = ""
-    if improvement is not None and improvement > 0:
-        imp_section = (
-            '<div style="margin-top:0.5rem;font-size:0.75rem;font-weight:700;'
-            f'color:{C["green"]};background:rgba(16,185,129,0.1);'
-            'border:1px solid rgba(16,185,129,0.3);padding:0.2rem 0.6rem;'
-            'border-radius:50px;>'
-            '<span style="font-size:1rem;">▲</span> '
-            f'+{improvement:.1f}% تحسن | Improvement'
-            '</div>'
-        )
-    
-    svg_html = f'''<svg width="110" height="110" viewBox="0 0 100 100" style="transform:rotate(-90deg);width:100%;height:100%;">
-        <circle cx="50" cy="50" r="40" stroke="{C['bg3']}" stroke-width="7" fill="none"></circle>
-        <circle cx="50" cy="50" r="40" stroke="{clr}" stroke-width="8" fill="none" stroke-dasharray="251.2" stroke-dashoffset="{offset}" stroke-linecap="round" style="transition:all 1.5s cubic-bezier(0.4,0,0.2,1);filter:drop-shadow(0 0 8px {clr}40);"></circle>
-    </svg>'''
-    
-    html_content = f'''
-    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1.5rem;background:{C['bg1']};border:1px solid {C['border']};border-radius:16px;min-height:270px;width:100%;">
-        <div style="font-size:0.75rem;color:{C['text2']};font-weight:700;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:1rem;">{label}</div>
-        <div style="position:relative;width:110px;height:110px;margin-bottom:0.8rem;">
-            {svg_html}
-            <div style="position:absolute;top:0;left:0;width:100%;height:100%;display:flex;align-items:center;justify-content:center;">
-                <span style="font-size:1.6rem;font-weight:900;color:{clr};line-height:1;">{score:.0f}%</span>
-            </div>
+    clr = C['green'] if score >= 85 else (C['yellow'] if score >= 65 else ("orange" if score >= 40 else C['red']))
+    badge = ("ممتاز | Excellent" if score >= 85 else
+             ("جيد | Good" if score >= 65 else
+              ("مقبول | Fair" if score >= 40 else "ضعيف | Poor")))
+
+    html = f"""
+    <div style="padding: 1rem; background: {C['bg1']}; border: 1px solid {C['border']}; border-radius: 18px; width: 100%; min-height: 200px; display: flex; flex-direction: column; align-items: center; justify-content: center;">
+        <div style="font-size: 0.78rem; color: {C['text2']}; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 1rem; text-align: center;">
+            {label}
         </div>
-        <div style="font-size:0.85rem;font-weight:800;color:{clr};background:{clr}20;border:1px solid {clr}40;padding:0.3rem 0.8rem;border-radius:50px;text-align:center;">{badge}</div>
-        {imp_section}
-    </div>
-    '''
-    
-    st.markdown(html_content, unsafe_allow_html=True)
+        <div style="font-size: 2.5rem; font-weight: 900; color: {clr}; line-height: 1; margin-bottom: 0.65rem;">{score:.1f}%</div>
+        <div style="font-size: 0.95rem; font-weight: 800; color: {clr}; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); padding: 0.35rem 0.9rem; border-radius: 999px; text-align: center;">
+            {badge}
+        </div>
+    </div>"""
+    st.markdown(html, unsafe_allow_html=True)
 
 def lang_pill(lang: str) -> str:
     labels = {
@@ -2825,20 +2396,7 @@ def col_profile_card(col: str, info: dict):
                 "date":"📅 تاريخ","boolean":"☑️ ثنائي"}.get(tp,"نصي")
     fp  = info.get("fill_rate", 0)
     np_ = info.get("null_pct",  0)
-    
-    # Color coding based on quality
-    if fp >= 95:
-        bclr = C['green']
-        quality_badge = "🟢 ممتاز"
-    elif fp >= 80:
-        bclr = C['cyan']
-        quality_badge = "🟢 جيد"
-    elif fp >= 50:
-        bclr = C['yellow']
-        quality_badge = "🟡 متوسط"
-    else:
-        bclr = C['red']
-        quality_badge = "🔴 ضعيف"
+    bclr= C['green'] if fp>=80 else (C['yellow'] if fp>=50 else C['red'])
 
     html = f"""
     <div class="col-profile">
@@ -2846,9 +2404,6 @@ def col_profile_card(col: str, info: dict):
             <span class="col-type-pill {pill_cls}">{pill_lbl}</span>
             <span class="col-name">{col}</span>
             {lang_pill(lang)}
-            <span style="margin-right: auto; font-size: 0.75rem; font-weight: 700; color: {bclr};">
-                {quality_badge}
-            </span>
         </div>
         <div class="col-stats">
             <div class="stat-item">
@@ -2870,7 +2425,7 @@ def col_profile_card(col: str, info: dict):
             </div>
             <div class="stat-item">
                 <span class="stat-label">الإكمال | Fill</span>
-                <span class="stat-value" style="color:{bclr};font-weight:800;">{fp}%</span>
+                <span class="stat-value" style="color:{bclr};">{fp}%</span>
             </div>"""
     if tp == "numeric" and "mean" in info:
         html += f"""
@@ -2894,11 +2449,11 @@ def col_profile_card(col: str, info: dict):
             </div>"""
     html += f"""
         </div>
-        <div style="font-size:0.72rem;color:{C['text3']};margin-bottom:0.35rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;">
+        <div style="font-size:0.7rem;color:{C['text3']};margin-bottom:0.22rem;">
             معدل الإكمال | Fill Rate
         </div>
         <div class="mini-bar-wrap">
-            <div class="mini-bar-fill" style="width:{fp}%;background:linear-gradient(90deg,{bclr},rgba({bclr},0.6));box-shadow:0 0 8px {bclr}40;"></div>
+            <div class="mini-bar-fill" style="width:{fp}%;background:{bclr};"></div>
         </div>"""
     if tp == "text" and "top_values" in info:
         chips = "".join(
@@ -2909,38 +2464,42 @@ def col_profile_card(col: str, info: dict):
     pii_type = info.get("pii_type")
     if pii_type:
         html += f"""
-        <div style="background:linear-gradient(135deg,rgba(6,182,212,0.12),rgba(6,182,212,0.06)); border:1px solid rgba(6,182,212,0.3); border-radius:8px; padding:0.6rem 0.8rem; margin-top:0.8rem; font-size:0.77rem; color:{C['cyan']}; font-weight:700; display:flex; align-items:center; gap:0.4rem; direction:rtl; box-shadow:0 2px 6px rgba(6,182,212,0.1);">
-            🛡️ بيانات حساسة ({pii_type}) | Sensitive {pii_type} Data
+        <div style="background:rgba(6,182,212,0.08); border:1px solid rgba(6,182,212,0.2); border-radius:8px; padding:0.45rem 0.7rem; margin-top:0.7rem; font-size:0.76rem; color:{C['cyan']}; font-weight:700; display:flex; align-items:center; gap:0.4rem; direction:rtl;">
+            🛡️ تم الكشف عن بيانات حساسة ({pii_type}) في هذا العمود وتم التحقق من سلامة البنية | Sensitive {pii_type} data detected and verified.
         </div>"""
         
     if info.get("recommend_drop"):
         reason_ar = "العمود شبه فارغ (ناقص بنسبة > 90%)" if info.get("is_high_missing") else "العمود ذو تباين منخفض جداً (قيمة واحدة متكررة بنسبة > 98%)"
         reason_en = "Column is > 90% missing" if info.get("is_high_missing") else "Column has zero/low variance (> 98% identical value)"
         html += f"""
-        <div style="background:linear-gradient(135deg,rgba(239,68,68,0.12),rgba(239,68,68,0.06)); border:1px solid rgba(239,68,68,0.3); border-radius:8px; padding:0.6rem 0.8rem; margin-top:0.8rem; font-size:0.77rem; color:#FCA5A5; font-weight:700; display:flex; align-items:center; gap:0.4rem; direction:rtl; box-shadow:0 2px 6px rgba(239,68,68,0.1);">
-            ⚠️ توصية: {reason_ar} | Recommendation: {reason_en}
+        <div style="background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.2); border-radius:8px; padding:0.45rem 0.7rem; margin-top:0.7rem; font-size:0.76rem; color:#FCA5A5; font-weight:700; display:flex; align-items:center; gap:0.4rem; direction:rtl;">
+            ⚠️ توصية بحذف العمود: {reason_ar} | Drop recommended: {reason_en}
         </div>"""
 
     html += "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
 def alert(msg, kind="info"):
-    """Professional alert with enhanced styling"""
     icons = {"info":"ℹ️","success":"✅","warning":"⚠️","danger":"❌"}
-    colors = {
-        "info": (C['accent'], "rgba(59,130,246,0.12)", "rgba(59,130,246,0.3)"),
-        "success": (C['green'], "rgba(16,185,129,0.12)", "rgba(16,185,129,0.3)"),
-        "warning": (C['yellow'], "rgba(245,158,11,0.12)", "rgba(245,158,11,0.3)"),
-        "danger": (C['red'], "rgba(239,68,68,0.12)", "rgba(239,68,68,0.3)")
-    }
-    color, bg, border = colors.get(kind, colors["info"])
-    
-    st.markdown(f"""
-    <div class="alert alert-{kind}" style="background:linear-gradient(135deg,{bg},{bg}); border:1px solid {border}; border-radius:12px; padding:1rem 1.2rem; margin:0.8rem 0; font-weight:600; font-size:0.92rem; display:flex; align-items:center; gap:0.8rem; box-shadow:0 2px 8px rgba(0,0,0,0.1);">
-        <span style="font-size:1.2rem; flex-shrink:0;">{icons.get(kind,"ℹ️")}</span>
-        <span style="color:{color}; flex:1;">{msg}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="alert alert-{kind}">{icons.get(kind,"ℹ️")} {msg}</div>',
+        unsafe_allow_html=True
+    )
+
+
+def log_dataframe_changes(audit_trail, original_df, updated_df, cols, reason):
+    if audit_trail is None:
+        return
+    for idx in original_df.index:
+        for col in cols:
+            if col in updated_df.columns and original_df.at[idx, col] != updated_df.at[idx, col]:
+                audit_trail.log_change(
+                    row_idx=idx,
+                    col_name=col,
+                    old_value=original_df.at[idx, col],
+                    new_value=updated_df.at[idx, col],
+                    reason=reason,
+                )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2973,9 +2532,6 @@ def render_sidebar():
             sc    = C['green'] if score>=85 else (C['yellow'] if score>=65 else C['red'])
             dup   = int(clean.duplicated().sum())
             miss  = int(clean.isnull().sum().sum())
-            
-            status = get_ai_quota_status()
-            sc_quota = C['green'] if status['usage_percentage'] < 50 else (C['yellow'] if status['usage_percentage'] < 80 else C['red'])
 
             st.markdown(f"""
             <div class="sb-section">
@@ -3012,24 +2568,7 @@ def render_sidebar():
                     <span class="sb-stat-value" style="color:{sc};">{score}/100</span>
                 </div>
             </div>
-            <div class="sb-section">
-                <div class="sb-section-title">🤖 الذكاء الاصطناعي المتقدم | Advanced AI</div>
-                <div style="text-align:center;margin:0.5rem 0;">
-                    <div style="font-size:0.75rem;color:{C['text3']};margin-bottom:0.3rem;">
-                        الحصة اليومية | Daily Quota
-                    </div>
-                    <div style="font-size:1.2rem;font-weight:800;color:{C['cyan']};">
-                        {status['remaining_quota']}/{AI_CONFIG['daily_quota']}
-                    </div>
-                    <div style="background: {C['bg3']}; border-radius: 4px; height: 6px; margin: 0.4rem 0; overflow: hidden; position: relative;">
-                        <div style="background: {sc_quota}; height: 100%; width: {min(status['usage_percentage'], 100)}%; border-radius: 4px;"></div>
-                    </div>
-                    {f'<div style="font-size:0.7rem;color:{C["red"]};margin-top:0.2rem;">⚠️ نفد الحصة اليومية | Quota exhausted</div>' if not can_use_professional_ai() else f'<div style="font-size:0.7rem;color:{C["green"]};margin-top:0.2rem;">✅ جاهز للعمل | Ready</div>'}
-                </div>
-            </div>""", unsafe_allow_html=True)
-
-            # Professional AI Status Display
-            display_professional_ai_status()
+            """, unsafe_allow_html=True)
 
             if st.session_state.cleaning_done:
                 st.markdown(f"""
@@ -3056,41 +2595,60 @@ def render_sidebar():
                 </div>
             </div>""", unsafe_allow_html=True)
             
-            # Get numerical columns only
+            # Get numerical columns and mixed numeric/text columns too
             profile = st.session_state.profile or {}
             numeric_cols = [
                 col for col, info in profile.items()
                 if info.get("type") == "numeric" and not col.startswith("__")
             ]
-            
-            # Multiselect for outlier columns
-            if numeric_cols:
-                selected_outlier_cols = st.multiselect(
-                    "Choose options",
-                    numeric_cols,
-                    default=st.session_state.get("selected_outlier_columns", []),
-                    key="outlier_selector",
-                    label_visibility="collapsed"
-                )
-                # Update session state
-                st.session_state.selected_outlier_columns = selected_outlier_cols
-                
-                # Show warning if no columns selected
-                if len(selected_outlier_cols) == 0 and st.session_state.step == 3:
+
+            mixed_numeric_cols = []
+            if AdvancedCleaner:
+                try:
+                    mixed_numeric_cols = [
+                        col for col in detect_numeric_columns_with_text(df)
+                        if not col.startswith("__") and col in df.columns
+                    ]
+                except Exception:
+                    mixed_numeric_cols = []
+
+            numeric_cols = sorted(set(numeric_cols + mixed_numeric_cols))
+
+            # ─── FIX: Fragment for sidebar outlier selector ───
+            @st.fragment
+            def render_outlier_selector():
+                if numeric_cols:
+                    def on_outlier_select():
+                        st.session_state.selected_outlier_columns = st.session_state.outlier_selector
+                    
+                    st.multiselect(
+                        "اختر أعمدة للكشف عن القيم الشاذة",
+                        numeric_cols,
+                        default=st.session_state.get("selected_outlier_columns", []),
+                        key="outlier_selector",
+                        label_visibility="collapsed",
+                        help="حدد الأعمدة الرقمية التي تريد تطبيق كشف القيم الشاذة عليها. إذا لم تحدد شيئاً، سيُطبق الكشف على كل الأعمدة الرقمية.",
+                        on_change=on_outlier_select
+                    )
+                    
+                    # Show warning if no columns selected when on the cleaning step
+                    if len(st.session_state.get("selected_outlier_columns", [])) == 0 and st.session_state.step == 3:
+                        st.markdown(f"""
+                        <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);
+                             border-radius:8px;padding:0.6rem;margin-top:0.5rem;text-align:right;">
+                            <span style="color:{C['yellow']};font-weight:700;font-size:0.85rem;">
+                                ⚠️ ⚠️ لم تختر أعمدة للكشف عن الشاذات | No columns selected for outlier detection
+                            </span>
+                        </div>""", unsafe_allow_html=True)
+                else:
                     st.markdown(f"""
-                    <div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);
-                         border-radius:8px;padding:0.6rem;margin-top:0.5rem;text-align:right;">
-                        <span style="color:{C['yellow']};font-weight:700;font-size:0.85rem;">
-                            ⚠️ ⚠️ لم تختر أعمدة للكشف عن الشاذات | No columns selected for outlier detection
-                        </span>
+                    <div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);
+                         border-radius:8px;padding:0.6rem;margin-top:0.5rem;text-align:right;font-size:0.82rem;
+                         color:{C['text2']};">
+                        ℹ️ لا توجد أعمدة رقمية | No numeric columns available
                     </div>""", unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.2);
-                     border-radius:8px;padding:0.6rem;margin-top:0.5rem;text-align:right;font-size:0.82rem;
-                     color:{C['text2']};">
-                    ℹ️ لا توجد أعمدة رقمية | No numeric columns available
-                </div>""", unsafe_allow_html=True)
+            
+            render_outlier_selector()
 
             st.markdown(f"""
             <div class="sb-section" style="margin-top:1.2rem;">
@@ -3101,7 +2659,7 @@ def render_sidebar():
                     ✦ تطبيع ذكي | Smart Normalize<br>
                     ✦ استنتاج ثنائي | Bilingual Infer<br>
                     ✦ رصد الشاذات | Outlier Detection<br>
-                    ✦ ✨ ذكاء اصطناعي | AI Deep Clean<br>
+                    ✦ ✨ تنظيف متقدم | Advanced Deep Clean<br>
                     ✦ تصدير احترافي | Pro Export
                 </div>
             </div>""", unsafe_allow_html=True)
@@ -3110,11 +2668,29 @@ def render_sidebar():
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN APP
 # ═══════════════════════════════════════════════════════════════════════════════
+def apply_sidebar_visibility():
+    if not st.session_state.get("sidebar_visible", True):
+        st.markdown(
+            """
+            <style>
+            [data-testid="stSidebar"] { display: none !important; }
+            section[data-testid="stMain"] { margin-left: 0 !important; }
+            .block-container { max-width: 100% !important; padding-left: 3rem !important; padding-right: 3rem !important; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def main():
     inject_css()
     init_state()
-    init_ai_quota()
     render_sidebar()
+    apply_sidebar_visibility()
+
+    sidebar_label = "🧭 إظهار / إخفاء اللوحة الجانبية"
+    if st.button(sidebar_label, key="toggle_sidebar"):
+        st.session_state.sidebar_visible = not st.session_state.sidebar_visible
 
     # Hero
     st.markdown(f"""
@@ -3141,14 +2717,14 @@ def main():
     if st.session_state.step == 1:
         stage_header(
             "الأولى | First", "📤 رفع البيانات | Upload Data",
-            "ارفع ملف CSV أو Excel بأي لغة — عربي، إنجليزي، أو مختلط. "
-            "النظام يكشف اللغة تلقائياً ويطبّق المعالجة المناسبة لكل عمود. | "
-            "Upload CSV or Excel in any language — Arabic, English, or mixed. "
-            "The system auto-detects language per column."
+            "أرسل ملف CSV أو Excel بأي لغة — عربي، إنجليزي، أو مختلط. "
+            "النظام يكتشف اللغة تلقائياً لكل عمود ويطبّق معالجة دقيقة ومتكاملة. | "
+            "Upload CSV or Excel in Arabic, English, or mixed. "
+            "The system auto-detects the language for each column and applies precise processing."
         )
 
         up = st.file_uploader(
-            "اسحب الملف هنا | Drag file here — CSV / Excel",
+            "حدد ملف CSV أو Excel | Select CSV / Excel",
             type=["csv","xlsx","xls"],
         )
 
@@ -3198,7 +2774,6 @@ def main():
                 alert(f"خطأ | Error: {e}", "danger")
 
         # Features
-        st.markdown('<div class="feature-grid">', unsafe_allow_html=True)
         feats = [
             ("🌐","ثنائي اللغة | Bilingual",
              "يعالج العربي والإنجليزي والمختلط في نفس الملف | "
@@ -3225,14 +2800,16 @@ def main():
              "خط معالجة متكامل في ثوانٍ | "
              "Complete pipeline in seconds"),
         ]
+        html = '<div class="feature-grid">'
         for icon,title,desc in feats:
-            st.markdown(f"""
+            html += f"""
             <div class="feature-card">
                 <span class="feature-icon">{icon}</span>
                 <div class="feature-title">{title}</div>
                 <div class="feature-desc">{desc}</div>
-            </div>""", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+            </div>"""
+        html += '</div>'
+        st.markdown(html, unsafe_allow_html=True)
 
     # ══════════════════════════════════════════════════════════════════════════
     # STEP 2 — ANALYSIS
@@ -3316,7 +2893,14 @@ def main():
                 )
             
             st.dataframe(
-                style_preview(df, preview_only=True, preview_rows=preview_rows),
+                style_preview(
+                    df,
+                    preview_only=True,
+                    preview_rows=preview_rows,
+                    median_coords=st.session_state.get("median_imputed_cells", []),
+                    outlier_coords=st.session_state.get("yellow_coordinates", []),
+                    missing_coords=st.session_state.get("red_coordinates", []),
+                ),
                 use_container_width=True,
                 height=420
             )
@@ -3386,10 +2970,10 @@ def main():
              "تحويل كافة صيغ التواريخ والأرقام المتسلسلة إلى YYYY-MM-DD", "Convert all date formats & serials to YYYY-MM-DD", "📅", "new"),
             ("تطبيع ثنائي اللغة", "Bilingual Normalization",
              "معالجة متطورة للنصوص العربية والإنجليزية", "Advanced Arabic NLP & English text normalization", "🔠", "bilingual"),
-            ("استنتاج ذكي ثنائي", "Bilingual Smart Inference",
-             "استنتاج قيم التصنيفات باستخدام كلمات مفتاحية", "Category filling using bilingual keywords", "🧠", "ai"),
-            ("تنظيف عميق بالذكاء الاصطناعي", "AI Deep Clean",
-             "تصحيح الأخطاء الإملائية واستنتاج الحالات من السياق", "Fix typos & infer order statuses contextually", "🤖", "ai"),
+            ("استنتاج متقدم ثنائي", "Advanced Bilingual Inference",
+             "استنتاج قيم التصنيفات باستخدام كلمات مفتاحية", "Category filling using bilingual keywords", "🧠", "advanced"),
+            ("تنظيف متقدم عميق", "Advanced Deep Cleaning",
+             "تصحيح الأخطاء الإملائية واستنتاج السياق", "Fix typos & infer values using context", "✨", "advanced"),
             ("توحيد الأنواع", "Type Standardization",
              "تحويل النصوص إلى أرقام أو قيم منطقية عند الحاجة", "Standardize string to numeric or boolean values", "🔢", "new"),
             ("رصد الشاذات", "Outlier Detection",
@@ -3403,7 +2987,7 @@ def main():
         ]
         badge_map = {
             "new":       '<span class="step-badge badge-new">✨ جديد</span>',
-            "ai":        '<span class="step-badge badge-ai">🧠 AI</span>',
+            "advanced":  '<span class="step-badge badge-advanced">🔥 متقدم</span>',
             "bilingual": '<span class="step-badge badge-bilingual">🌐 ثنائي</span>',
             "":          "",
         }
@@ -3468,50 +3052,16 @@ def main():
                         value=adv_opts.get("optimize_memory", False),
                         help="تقليل حجم البيانات في الذاكرة (float64→float32, إلخ)"
                     )
+                    st.session_state.advanced_options["auto_drop_low_variance"] = st.checkbox(
+                        "🧹 حذف الأعمدة الفارغة أو منخفضة التباين تلقائياً",
+                        value=adv_opts.get("auto_drop_low_variance", False),
+                        help="إزالة الأعمدة التي تحتوي على أكثر من 90% قيم ناقصة أو أكثر من 98% قيمة مكررة"
+                    )
                 
                 st.info(
                     "💡 **نصيحة | Tip:** استخدم جميع الخيارات المتقدمة للحصول على أفضل جودة تنظيف!\n"
                     "Use all advanced options for the best cleaning quality!"
                 )
-
-        # ═══════════════════════════════════════════════════════════════════════════
-        # AI DEEP CLEAN BUTTON
-        # ═══════════════════════════════════════════════════════════════════════════
-        if Groq and st.session_state.df is not None and 'Status' in st.session_state.df.columns:
-            st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-            
-            col_ai, col_warn = st.columns([3, 1])
-            with col_ai:
-                ai_button_disabled = not can_use_ai()
-                if st.button(
-                    "✨ Deep AI Clean ✨" if not ai_button_disabled else "🚫 Deep AI Clean (Quota Exhausted)",
-                    disabled=ai_button_disabled,
-                    use_container_width=True,
-                    help="استخدم الذكاء الاصطناعي لتصحيح الأخطاء العربية المعقدة واستنتاج القيم المفقودة | Use AI to fix complex Arabic errors and infer missing values"
-                ):
-                    with st.spinner("🤖 جاري التنظيف بالذكاء الاصطناعي... | AI cleaning in progress..."):
-                        df_copy = st.session_state.df.copy()
-                        df_cleaned, ai_processed = apply_ai_cleaning(df_copy)
-                        
-                        if ai_processed > 0:
-                            st.session_state.df = df_cleaned
-                            st.success(f"✅ تم تنظيف {ai_processed} صف باستخدام الذكاء الاصطناعي | {ai_processed} rows cleaned with AI")
-                            st.rerun()
-                        else:
-                            st.info("ℹ️ لم يتم العثور على صفوف تحتاج تنظيف ذكي | No rows needed AI cleaning")
-            
-            with col_warn:
-                if not can_use_ai():
-                    st.markdown(f"""
-                    <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);
-                         border-radius:8px;padding:0.5rem;margin-top:0.3rem;text-align:center;">
-                        <div style="color:{C['red']};font-weight:700;font-size:0.75rem;">
-                            نفد الحصة
-                        </div>
-                        <div style="color:{C['text3']};font-size:0.65rem;">
-                            غداً | Tomorrow
-                        </div>
-                    </div>""", unsafe_allow_html=True)
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
         cb, cr = st.columns(2)
@@ -3529,7 +3079,7 @@ def main():
                     "تصحيح التواريخ | Fixing dates...",
                     "تطبيع النصوص AR+EN | Normalizing AR+EN text...",
                     "الاستنتاج الذكي | Running smart inference...",
-                    "✨ التنظيف بالذكاء الاصطناعي | AI deep cleaning...",
+                    "✨ التنظيف العميق | Deep cleaning...",
                     "توحيد الأنواع | Standardizing types...",
                     "رصد الشاذات | Detecting outliers...",
                     "حذف المكررات | Removing duplicates...",
@@ -3576,7 +3126,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-        st.markdown('<div class="impact-grid">', unsafe_allow_html=True)
         impacts = [
             ("🗑️","صفوف محذوفة | Rows Removed",
              f"{st.session_state.rows_deleted:,}","مكررة | duplicates"),
@@ -3594,15 +3143,17 @@ def main():
              f"{st.session_state.rows_before:,}→{st.session_state.rows_after:,}",
              "قبل→بعد | before→after"),
         ]
+        html = '<div class="impact-grid">'
         for icon,lbl,val,sub in impacts:
-            st.markdown(f"""
+            html += f"""
             <div class="impact-card">
                 <div class="impact-icon">{icon}</div>
                 <div class="impact-val">{val}</div>
                 <div class="impact-lbl">{lbl}</div>
                 <div class="impact-sub">{sub}</div>
-            </div>""", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+            </div>"""
+        html += '</div>'
+        st.markdown(html, unsafe_allow_html=True)
 
         # Quality
         qa_c, qb_c = st.columns(2)
@@ -3619,31 +3170,56 @@ def main():
 
         # Tabs
         audit_trail = st.session_state.get("audit_trail")
-        if audit_trail is not None and not audit_trail.empty:
-            t1,t2,t3,t4,t5 = st.tabs([
-                "📊  البيانات | Data",
-                "📋  الأعمدة | Columns",
-                "🚨  الشاذات | Outliers",
-                "📝  السجل | Log",
-                "📋  سجل التغييرات | Audit Trail",
-            ])
-        else:
-            t1,t2,t3,t4 = st.tabs([
-                "📊  البيانات | Data",
-                "📋  الأعمدة | Columns",
-                "🚨  الشاذات | Outliers",
-                "📝  السجل | Log",
-            ])
+        t1,t2,t3,t4,t5 = st.tabs([
+            "📊  البيانات | Data",
+            "📋  الأعمدة | Columns",
+            "🚨  الشاذات | Outliers",
+            "📝  السجل | Log",
+            "📋  سجل التغييرات | Audit Trail",
+        ])
         
         with t1:
             alert(
                 "🔴 أحمر | Red = غير محدد / Not Specified  |  "
                 "🟡 أصفر | Yellow = قيمة شاذة | Outlier  |  "
+                "✨ أخضر نيون | Neon Green = نص مستنتج بذكاء | AI-Imputed Text  |  "
                 "📅 تواريخ | Dates = YYYY-MM-DD",
                 "info"
             )
-            st.dataframe(style_preview(df.head(50)),
-                         use_container_width=True, height=420)
+            st.dataframe(
+                style_preview(
+                    df.head(50),
+                    preview_only=True,
+                    preview_rows=50,
+                    median_coords=st.session_state.get("median_imputed_cells", []),
+                    outlier_coords=st.session_state.get("yellow_coordinates", []),
+                    missing_coords=st.session_state.get("red_coordinates", []),
+                ),
+                use_container_width=True, height=420
+            )
+            
+            # NEW: Display imputed text cells with neon green highlighting
+            text_mask = st.session_state.get("text_imputation_mask")
+            if text_mask is not None and (text_mask.sum().sum() > 0):
+                st.markdown("---")
+                st.subheader("✨ النصوص المستنتجة بذكاء | AI-Imputed Text Cells")
+                st.markdown(
+                    f"<div style='font-size:0.9rem;color:#86EFAC;font-weight:600;margin-bottom:1rem;'>"
+                    f"🎯 تم استنتاج واستكمال **{int(text_mask.sum().sum())}** خلية نصية بناءً على السياق والعلاقات في البيانات | "
+                    f"**{int(text_mask.sum().sum())}** text cells were intelligently imputed based on context analysis."
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+                try:
+                    styled_imputed = style_imputed_text_cells(
+                        df=df.head(50),
+                        imputation_mask=text_mask.head(50),
+                        preview_only=True,
+                        preview_rows=50
+                    )
+                    st.dataframe(styled_imputed, use_container_width=True, height=300)
+                except Exception as e:
+                    st.warning(f"Could not display imputed cells: {str(e)[:50]}")
 
         with t2:
             pa = build_profile(df)
@@ -3693,8 +3269,8 @@ def main():
                     )
         
         # Audit Trail Tab
-        if audit_trail is not None and not audit_trail.empty:
-            with t5:
+        with t5:
+            if audit_trail is not None and not audit_trail.empty:
                 st.subheader("📋 سجل التغييرات | Change Log")
                 alert(
                     "جميع التغييرات التي تمت على البيانات، الصف رقم، العمود، القيمة القديمة والجديدة | "
@@ -3705,12 +3281,28 @@ def main():
                 
                 # Download Audit Trail
                 audit_csv = audit_trail.to_csv(index=False, encoding='utf-8-sig')
-                st.download_button(
-                    label="📥 تنزيل سجل التغييرات | Download Change Log",
-                    data=audit_csv,
-                    file_name=f"audit_trail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv",
-                )
+                with io.BytesIO() as excel_buffer:
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        audit_trail.to_excel(writer, index=False)
+                    excel_data = excel_buffer.getvalue()
+
+                col_csv, col_xlsx = st.columns(2)
+                with col_csv:
+                    st.download_button(
+                        label="📥 تنزيل سجل التغييرات CSV | Download Change Log CSV",
+                        data=audit_csv,
+                        file_name=f"audit_trail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                    )
+                with col_xlsx:
+                    st.download_button(
+                        label="📥 تنزيل سجل التغييرات Excel | Download Change Log Excel",
+                        data=excel_data,
+                        file_name=f"audit_trail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+            else:
+                alert("لا يوجد سجل تغييرات حالياً. | No audit trail available yet.", "info")
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 

@@ -1,0 +1,17 @@
+Customer ID,First Name,Last Name,Age,City,Email,Purchase Amount,Last Purchase Date
+1,Ahmed,Hassan,28,Cairo,ahmed.hassan@email.com,1500,2026-01-15
+2,Fatima,Mohamed,,Alexandria,fatima.m@email.com,2300,2026-02-20
+3,Omar,Ali,35,Giza,,1800,2026-01-10
+1,Ahmed,Hassan,28,Cairo,ahmed.hassan@email.com,1500,2026-01-15
+4,Noor,Ibrahim,,Cairo,noor.ibrahim@email.com,950,2026-03-05
+5,Layla,Karim,31,Alexandria,layla.k@email.com,,2026-02-15
+6,,Hassan,45,Cairo,hassan.hassan@email.com,2100,2026-01-20
+7,Zainab,Mohammed,27,,zainab.m@email.com,1200,2026-03-10
+8,Amr,Khalil,38,Giza,amr.khalil@email.com,3500,2026-02-28
+9,Sara,Youssef,,Alexandria,sara.y@email.com,1650,2026-01-30
+10,Karim,Rashid,42,Cairo,,1900,
+11,Hana,Salim,29,Giza,hana.salim@email.com,2200,2026-03-01
+12,Jamal,Hassan,35,,jamal.hassan@email.com,1400,2026-02-05
+9,Sara,Youssef,,Alexandria,sara.y@email.com,1650,2026-01-30
+13,Leena,Ahmed,26,Cairo,leena.ahmed@email.com,,2026-03-15
+14,Rami,Hassan,40,Alexandria,,1750,2026-01-25

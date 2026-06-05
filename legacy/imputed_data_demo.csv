@@ -1,0 +1,11 @@
+Product_ID,Product_Name,Department,Price,Stock_Quantity,Category,Supplier,Price_imputation_status,Stock_Quantity_imputation_status,Category_imputation_status,Supplier_imputation_status
+P001,Coffee,Foods,15.0,1000.0,Beverage,Vendor_A,Populated,Populated,Populated,Populated
+P001,Coffee,Foods,15.0,1000.0,Beverage,Vendor_A,Filled by Item Context,Filled by Item Context,Populated,Filled by Item Context
+P002,Laptop,Electronics,999.0,5.0,Computer,Vendor_B,Populated,Populated,Filled by Item Context,Populated
+P002,Laptop,Electronics,999.0,5.0,Computer,Vendor_B,Filled by Item Context,Filled by Item Context,Populated,Populated
+P003,Mouse,Electronics,25.0,500.0,Peripheral,Vendor_C,Populated,Populated,Filled by Item Context,Filled by Item Context
+P003,Mouse,Electronics,25.0,600.0,Peripheral,Vendor_C,Filled by Item Context,Populated,Populated,Populated
+P004,Desk,Office,200.0,20.0,Furniture,Vendor_D,Populated,Populated,Filled by Item Context,Populated
+P004,Desk,Office,200.0,25.0,Furniture,Vendor_D,Filled by Item Context,Populated,Populated,Populated
+P005,Monitor,Electronics,350.0,10.0,Display,Vendor_B,Populated,Populated,Populated,Populated
+P005,Monitor,Electronics,350.0,10.0,Display,Vendor_B,Populated,Filled by Item Context,Populated,Populated
