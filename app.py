@@ -51,13 +51,13 @@ try:
         AuditTrail,
         clean_phone_column,
         detect_phone_column,
-        clean_numeric_columns,
         detect_numeric_columns_with_text,
+        clean_name_columns,
+        detect_name_columns,
         apply_fuzzy_matching,
         optimize_memory,
         read_csv_with_encoding_fallback,
     )
-    from core.date_cleaner import clean_dates_advanced
     from stats.advanced_imputation import (
         universal_missing_value_imputation,
         streamlit_imputation_style,
@@ -1004,9 +1004,7 @@ def init_state():
         # ─── Advanced Features ───
         "advanced_options": {
             "clean_phones": bool(AdvancedCleaner),
-            "clean_numeric": bool(AdvancedCleaner),
             "fuzzy_match": bool(AdvancedCleaner),
-            "fix_dates": bool(AdvancedCleaner),
             "optimize_memory": bool(AdvancedCleaner),
             "impute_text": bool(AdvancedCleaner),
             "auto_drop_low_variance": False,
@@ -1609,10 +1607,16 @@ def _fill_missing(df):
                         median_imputed.extend((idx, col) for idx in df.index[missing_mask])
             continue
 
-        if pd.api.types.is_string_dtype(df[col]) or df[col].dtype == object:
+        if (
+            pd.api.types.is_string_dtype(df[col])
+            or df[col].dtype == object
+            or pd.api.types.is_categorical_dtype(df[col])
+        ):
             df[col] = _drop_blank_strings_for_text(df, col)
             missing_mask = df[col].isna()
             if missing_mask.any():
+                if pd.api.types.is_categorical_dtype(df[col]):
+                    df[col] = df[col].cat.add_categories(["غير محدد"])
                 df.loc[missing_mask, col] = "غير محدد"
                 text_missing.extend((idx, col) for idx in df.index[missing_mask])
             continue
@@ -1757,24 +1761,6 @@ def run_cleaning():
         except Exception as e:
             log.append(f"⚠️ خطأ في توحيد التليفونات: {str(e)}")
 
-    # ─── ADVANCED: تنظيف الأرقام المخلوطة ───
-    if adv_opts.get("clean_numeric", False) and AdvancedCleaner:
-        try:
-            before_numeric = df.copy()
-            df, num_log = clean_numeric_columns(df)
-            if num_log.get("columns_cleaned", 0) > 0:
-                log.append(f"✨ تنظيف الأرقام: {num_log['values_converted']} | Numeric cleaning: {num_log['values_converted']}")
-                if audit_trail:
-                    log_dataframe_changes(
-                        audit_trail,
-                        before_numeric,
-                        df,
-                        cols=before_numeric.columns.tolist(),
-                        reason="Clean Mixed Numbers / تنظيف الأرقام المخلوطة"
-                    )
-        except Exception as e:
-            log.append(f"⚠️ خطأ في تنظيف الأرقام: {str(e)}")
-
     # ─── ADVANCED: الدمج الذكي للمتشابهات ───
     if adv_opts.get("fuzzy_match", False) and AdvancedCleaner:
         try:
@@ -1793,28 +1779,9 @@ def run_cleaning():
         except Exception as e:
             log.append(f"⚠️ خطأ في الدمج الذكي: {str(e)}")
 
-    # 3. إصلاح التواريخ (العادي أو المتقدم)
-    if adv_opts.get("fix_dates", False) and AdvancedCleaner:
-        try:
-            before_dates = df.copy()
-            df, dates_log = clean_dates_advanced(df)
-            dates = dates_log.get("dates_fixed", 0)
-            log.append(f"✨ تصحيح التواريخ المتقدم: {dates} | Advanced date fixing: {dates}")
-            if audit_trail:
-                log_dataframe_changes(
-                    audit_trail,
-                    before_dates,
-                    df,
-                    cols=before_dates.columns.tolist(),
-                    reason="Advanced Date Validation / التحقق المتقدم من التواريخ"
-                )
-        except Exception as e:
-            log.append(f"⚠️ خطأ في تصحيح التواريخ: {str(e)}")
-            df, dates = fix_date_columns(df)
-            log.append(f"تصحيح التواريخ: {dates} | Date fixed: {dates}")
-    else:
-        df, dates = fix_date_columns(df)
-        log.append(f"تصحيح التواريخ → YYYY-MM-DD | Fixed {dates} dates")
+    # 3. إصلاح التواريخ
+    df, dates = fix_date_columns(df)
+    log.append(f"تصحيح التواريخ → YYYY-MM-DD | Fixed {dates} dates")
 
     # 4. تطبيع النصوص (عربي + إنجليزي)
     _arabic_english_normalization_pass(df)
@@ -1839,6 +1806,7 @@ def run_cleaning():
     text_cols = df.select_dtypes(include=["object", "string", "category"]).columns.tolist()
 
     st.session_state["green_coordinates"] = _collect_missing_numeric_coords(df, numeric_cols)
+    # Preserve the original missing-text coordinates (pre-imputation)
     st.session_state["red_coordinates"] = _collect_missing_text_coords(df, text_cols)
 
     selected_cols = st.session_state.get("selected_outlier_columns", [])
@@ -1869,7 +1837,14 @@ def run_cleaning():
 
     st.session_state["median_imputed_cells"] = list(median_imputed)
     st.session_state["green_coordinates"] = list(median_imputed)
-    st.session_state["red_coordinates"] = list(text_missing)
+    # `text_missing` captures which text cells were filled by the fallback
+    # earlier in the pipeline (set to 'غير محدد'). Keep as original red markers.
+    if text_missing:
+        # Only extend existing red_coordinates; do not overwrite later when
+        # dynamic imputation replaces values — we need the original missing map.
+        existing_red = set(tuple(c) for c in st.session_state.get("red_coordinates", []))
+        existing_red.update((idx, col) for idx, col in text_missing)
+        st.session_state["red_coordinates"] = list(existing_red)
     log.append("ملء القيم الفارغة بذكاء | Smart fill")
 
     # ─── NEW: DYNAMIC CONTEXTUAL TEXT IMPUTATION ───
@@ -1879,6 +1854,20 @@ def run_cleaning():
             from core.text_processor import dynamic_contextual_text_imputation
             before_text_impute = df.copy()
             df, text_imputation_mask = dynamic_contextual_text_imputation(df)
+            # Persist the imputed dataset directly in session state so the
+            # UI grid and export/download share the exact same final dataset.
+            st.session_state["df"] = df
+            text_cols = df.select_dtypes(include=["object", "string", "category"]).columns.tolist()
+            # Do NOT overwrite `red_coordinates` here — those mark original
+            # missing cells. Instead, record imputed coords separately so the
+            # UI and export can highlight them (pink) while preserving red.
+            if isinstance(text_imputation_mask, pd.DataFrame):
+                imputed_coords = [
+                    (int(idx), col) for (idx, col), val in text_imputation_mask.stack().items() if val
+                ]
+                st.session_state["imputed_text_coords"] = imputed_coords
+            else:
+                st.session_state["imputed_text_coords"] = []
             imputation_count = int(text_imputation_mask.sum().sum())
             if imputation_count > 0:
                 log.append(f"✨ استنتاج نصوص سياقي: {imputation_count} خلية | Dynamic contextual text imputation: {imputation_count} cells")
@@ -1997,10 +1986,24 @@ def _collect_missing_numeric_coords(df: pd.DataFrame, cols) -> list:
     return [(idx, col) for col in cols for idx in df.index[df[col].isna()]]
 
 
+def _common_text_placeholder_regex() -> re.Pattern:
+    base = [
+        r'nan', r'unknown', r'null', r'none', r'n/?a', r'n\.?.a\.?', r'missing',
+        r'not available', r'غير\s+محدد', r'غير\s+متوفر', r'بيانات\s+ناقصة',
+    ]
+    pattern = r'^(?:[\W_]*)(?:' + r'|'.join(base) + r')(?:[\W_]*)$'
+    return re.compile(pattern, flags=re.IGNORECASE | re.UNICODE)
+
+
 def _collect_missing_text_coords(df: pd.DataFrame, cols) -> list:
     coords = []
+    placeholder_rx = _common_text_placeholder_regex()
     for col in cols:
-        mask = df[col].isna() | df[col].astype(str).str.strip().eq("")
+        mask = (
+            df[col].isna()
+            | df[col].astype(str).str.strip().eq("")
+            | df[col].astype(str).str.match(placeholder_rx)
+        )
         for idx in df.index[mask]:
             coords.append((idx, col))
     return coords
@@ -2009,7 +2012,12 @@ def _collect_missing_text_coords(df: pd.DataFrame, cols) -> list:
 def _drop_blank_strings_for_text(df: pd.DataFrame, col: str) -> pd.Series:
     series = df[col]
     if pd.api.types.is_string_dtype(series) or series.dtype == object:
-        return series.where(~series.astype(str).str.strip().eq(""), np.nan)
+        placeholder_rx = _common_text_placeholder_regex()
+        normalized = series.astype(str).str.strip()
+        return series.where(
+            ~normalized.eq("") & ~normalized.str.match(placeholder_rx),
+            np.nan,
+        )
     return series
 
 
@@ -2028,23 +2036,25 @@ def _safe_export_convert(df: pd.DataFrame) -> pd.DataFrame:
     return de
 
 
-def export_excel(df: pd.DataFrame) -> bytes:
-    de = _safe_export_convert(df)
+def export_excel(df: pd.DataFrame = None) -> bytes:
+    df_export = df.copy() if isinstance(df, pd.DataFrame) else get_export_dataframe()
+    de = _safe_export_convert(df_export)
     oflg = de.pop("__outlier__") if "__outlier__" in de.columns else None
 
+    # Use the UI's exact processed DataFrame and styling state for Excel export.
+    # This guarantees the same final text values and the same style mapping as shown in the UI.
     date_cols = {
-        col for col in df.columns
-        if not col.startswith("__") and _is_date_column(df[col])
+        col for col in df_export.columns
+        if not col.startswith("__") and _is_date_column(df_export[col])
     }
 
-    red_coords = set(tuple(c) for c in st.session_state.get("red_coordinates", []))
-    green_coords = set(tuple(c) for c in st.session_state.get("green_coordinates", []))
-    yellow_coords = set(tuple(c) for c in st.session_state.get("yellow_coordinates", []))
-    numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+    style_map = get_ui_style_mapping()
+
+    numeric_cols = df_export.select_dtypes(include=["number"]).columns.tolist()
     col_langs = {}
-    for col in df.columns:
+    for col in df_export.columns:
         if col.startswith("__"): continue
-        col_langs[col] = detect_column_language(df[col])
+        col_langs[col] = detect_column_language(df_export[col])
 
     out = io.BytesIO()
     wb = Workbook()
@@ -2066,6 +2076,7 @@ def export_excel(df: pd.DataFrame) -> bytes:
     missing_fill = PatternFill(fill_type="solid", fgColor="F8D7DA")
     outlier_fill = PatternFill(fill_type="solid", fgColor="FFF3CD")
     median_fill = PatternFill(fill_type="solid", fgColor="D4EDDA")
+    imputed_text_fill = PatternFill(fill_type="solid", fgColor="FFD1DC")
 
     for ci, col in enumerate(de.columns, start=1):
         header = ws.cell(row=1, column=ci, value=col)
@@ -2079,14 +2090,15 @@ def export_excel(df: pd.DataFrame) -> bytes:
         ) + 4, 45)
         ws.column_dimensions[get_column_letter(ci)].width = width
 
-    for ri, idx in enumerate(de.index, start=2):
-        actual_idx = df.index[ri - 2]
+    original_index = list(de.index)
+    de = de.reset_index(drop=True)
+
+    for ri, actual_idx in enumerate(original_index, start=2):
+        row = de.iloc[ri - 2]
         for ci, col in enumerate(de.columns, start=1):
-            raw_val = de.at[idx, col]
+            raw_val = row[col]
             coord = (actual_idx, col)
-            is_missing_text = coord in red_coords
-            is_median = coord in green_coords
-            is_outlier = coord in yellow_coords
+            style_type = style_map.get(coord)
             lang = col_langs.get(col, "ar")
 
             cell = ws.cell(row=ri, column=ci)
@@ -2100,17 +2112,15 @@ def export_excel(df: pd.DataFrame) -> bytes:
             else:
                 cell.alignment = align_right
 
-            if is_median:
+            # Apply the exact UI-derived background fill for WYSIWYG export.
+            if style_type == "medium":
                 cell.fill = median_fill
-            elif is_outlier:
+            elif style_type == "outlier":
                 cell.fill = outlier_fill
-            elif is_missing_text:
+            elif style_type == "ai_imputed":
+                cell.fill = imputed_text_fill
+            elif style_type == "missing":
                 cell.fill = missing_fill
-
-            if is_missing_text:
-                cell.value = "غير محدد"
-                cell.number_format = "@"
-                continue
 
             if col in date_cols:
                 cell.value = "" if pd.isna(raw_val) else str(raw_val)
@@ -2153,21 +2163,89 @@ def export_excel(df: pd.DataFrame) -> bytes:
     return out.getvalue()
 
 
-def export_csv(df: pd.DataFrame) -> bytes:
-    de  = _safe_export_convert(df).drop(
+def _sanitize_export_dataframe_for_csv(df: pd.DataFrame) -> pd.DataFrame:
+    df_export = _safe_export_convert(df).drop(
         columns=[c for c in df.columns if c.startswith("__")],
         errors="ignore"
     )
+    # Match UI display: do not emit Python NaN tokens into the CSV.
+    df_export = df_export.where(pd.notna(df_export), "")
+    return df_export
+
+
+def export_csv(df: pd.DataFrame = None) -> bytes:
+    df_export = df.copy() if isinstance(df, pd.DataFrame) else get_export_dataframe()
+    de = _sanitize_export_dataframe_for_csv(df_export)
     out = io.BytesIO()
     out.write("\ufeff".encode("utf-8"))
-    de.to_csv(out, index=False, encoding="utf-8")
+    de.to_csv(out, index=False, encoding="utf-8", na_rep="")
     out.seek(0)
     return out.getvalue()
 
 
+def get_export_dataframe() -> pd.DataFrame:
+    """Return the final processed DataFrame used for exports and displayed in the UI.
+
+    This helper always prefers the mutated session-state dataset so UI rendering and
+    download/export data come from the exact same source.
+    """
+    df = st.session_state.get("df")
+    if df is not None:
+        return df.copy()
+    return st.session_state.get("df_original", pd.DataFrame()).copy()
+
+
+def get_ui_style_coordinates():
+    """Return the exact UI styling coordinate sets used by the table grid.
+
+    These coordinates are the single source of truth for both the displayed
+    table preview and the WYSIWYG export pipelines.
+    """
+    missing_coords = set(tuple(c) for c in st.session_state.get("red_coordinates", []))
+    outlier_coords = set(tuple(c) for c in st.session_state.get("yellow_coordinates", []))
+    median_coords = set(tuple(c) for c in st.session_state.get("green_coordinates", []))
+    if not median_coords:
+        median_coords = set(tuple(c) for c in st.session_state.get("median_imputed_cells", []))
+
+    imputed_coords = set(tuple(c) for c in st.session_state.get("imputed_text_coords", []))
+    if not imputed_coords:
+        text_mask = st.session_state.get("text_imputation_mask")
+        if isinstance(text_mask, pd.DataFrame):
+            imputed_coords = {
+                (idx, col)
+                for (idx, col), val in text_mask.stack().items()
+                if val
+            }
+
+    return {
+        "missing": missing_coords,
+        "outlier": outlier_coords,
+        "median": median_coords,
+        "imputed": imputed_coords,
+    }
+
+
+def get_ui_style_mapping():
+    """Return a coordinate-to-style mapping used by both UI preview and export."""
+    style_coords = get_ui_style_coordinates()
+    style_map = {}
+
+    # Preserve priority: original missing < outlier < median < AI-imputed text
+    for coord in style_coords["missing"]:
+        style_map[coord] = "missing"
+    for coord in style_coords["outlier"]:
+        style_map[coord] = "outlier"
+    for coord in style_coords["median"]:
+        style_map[coord] = "medium"
+    for coord in style_coords["imputed"]:
+        style_map[coord] = "ai_imputed"
+
+    return style_map
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # STYLER - OPTIMIZED FOR LARGE DATASETS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════
 @st.cache_data
 def _get_style_config():
     """Cache styling configuration"""
@@ -2177,15 +2255,15 @@ def _get_style_config():
         "outlier_style": "background-color:rgba(255,243,205,0.85);",
         "median_style": "background-color:rgba(212,237,218,0.85);",
         # NEW: Neon Green for imputed text cells (optimized for dark mode)
-        "imputed_text_style": "background-color:rgba(34,197,94,0.25);border:1.5px solid rgba(34,197,94,0.6);color:#86EFAC;font-weight:600;",
+        "imputed_text_style": "background-color:rgba(255,209,220,0.85);border:1.5px solid rgba(255,150,175,0.6);color:#991B1B;font-weight:700;",
     }
 
 
 def style_imputed_text_cells(df: pd.DataFrame, imputation_mask: pd.DataFrame, preview_only: bool = True, preview_rows: int = 100):
     """
-    HIGHLIGHT IMPUTED TEXT CELLS with neon green (dark mode optimized).
+    HIGHLIGHT IMPUTED TEXT CELLS with soft pink highlight.
     
-    This function applies a sleek neon green highlight to cells where:
+    This function applies a soft pink highlight to cells where:
     - The Dynamic Contextual Text Imputation successfully predicted and filled a missing value.
     
     Args:
@@ -2219,7 +2297,7 @@ def style_imputed_text_cells(df: pd.DataFrame, imputation_mask: pd.DataFrame, pr
         config = _get_style_config()
 
         def highlight_imputed(data):
-            """Apply neon green highlight to imputed cells."""
+            """Apply soft pink highlight to imputed cells."""
             # data is a Series for each row
             styles = []
             for col_name, val in data.items():
@@ -2252,9 +2330,10 @@ def _get_style_config():
         "missing_style": "background-color:rgba(248,215,218,0.85);color:#991B1B;font-weight:700;border:1px solid rgba(248,215,218,0.6);",
         "outlier_style": "background-color:rgba(255,243,205,0.85);",
         "median_style": "background-color:rgba(212,237,218,0.85);",
+        "imputed_text_style": "background-color:rgba(255,209,220,0.85);border:1.5px solid rgba(255,150,175,0.6);color:#991B1B;font-weight:700;",
     }
 
-def style_preview(df: pd.DataFrame, preview_only: bool = True, preview_rows: int = 100, median_coords=None, outlier_coords=None, missing_coords=None):
+def style_preview(df: pd.DataFrame, preview_only: bool = True, preview_rows: int = 100, median_coords=None, outlier_coords=None, missing_coords=None, imputed_coords=None):
     """
     OPTIMIZED: Style only preview rows to avoid Pandas Styler rendering limits
     
@@ -2281,9 +2360,18 @@ def style_preview(df: pd.DataFrame, preview_only: bool = True, preview_rows: int
             disp = df.drop(columns=["__outlier__"], errors="ignore")
         
         config = _get_style_config()
-        median_coords = set(tuple(c) for c in (median_coords or []))
-        outlier_coords = set(tuple(c) for c in (outlier_coords or []))
-        missing_coords = set(tuple(c) for c in (missing_coords or []))
+        if median_coords is None or outlier_coords is None or missing_coords is None or imputed_coords is None:
+            style_map = get_ui_style_mapping()
+        else:
+            style_map = {}
+            for coord in set(tuple(c) for c in (missing_coords or [])):
+                style_map[coord] = "missing"
+            for coord in set(tuple(c) for c in (outlier_coords or [])):
+                style_map[coord] = "outlier"
+            for coord in set(tuple(c) for c in (median_coords or [])):
+                style_map[coord] = "medium"
+            for coord in set(tuple(c) for c in (imputed_coords or [])):
+                style_map[coord] = "ai_imputed"
 
         def row_s(row):
             actual_idx = df.index[row.name] if preview_only and len(df) > preview_rows else row.name
@@ -2291,11 +2379,14 @@ def style_preview(df: pd.DataFrame, preview_only: bool = True, preview_rows: int
 
             for col, val in row.items():
                 coord = (actual_idx, col)
-                if coord in median_coords:
+                style_type = style_map.get(coord)
+                if style_type == "medium":
                     styles.append(config["median_style"])
-                elif coord in outlier_coords:
+                elif style_type == "outlier":
                     styles.append(config["outlier_style"])
-                elif coord in missing_coords:
+                elif style_type == "ai_imputed":
+                    styles.append(config["imputed_text_style"])
+                elif style_type == "missing":
                     styles.append(config["missing_style"])
                 else:
                     styles.append("")
@@ -2747,9 +2838,21 @@ def main():
                         if _detect_type(df[col]) == "text":
                             lang_summary[col] = detect_column_language(df[col])
 
+                # Persist the raw uploaded bytes so exports can compare
+                try:
+                    raw_bytes = up.read()
+                except Exception:
+                    # Fallback: some Streamlit Uploaders are file-like already
+                    try:
+                        up.seek(0)
+                        raw_bytes = up.getvalue()
+                    except Exception:
+                        raw_bytes = None
+
                 st.session_state.update({
                     "df": df.copy(), "df_original": df.copy(),
                     "file_name": up.name, "file_size": up.size,
+                    "uploaded_file_bytes": raw_bytes,
                     "step": 2, "profile": profile,
                     "quality_before": score,
                     "detected_langs": lang_summary,
@@ -2900,6 +3003,7 @@ def main():
                     median_coords=st.session_state.get("median_imputed_cells", []),
                     outlier_coords=st.session_state.get("yellow_coordinates", []),
                     missing_coords=st.session_state.get("red_coordinates", []),
+                    imputed_coords=st.session_state.get("imputed_text_coords", []),
                 ),
                 use_container_width=True,
                 height=420
@@ -3028,23 +3132,10 @@ def main():
                         help="تحويل جميع صيغ التليفونات إلى صيغة موحدة (+201XXXXXXXXX)"
                     )
                     
-                    st.session_state.advanced_options["clean_numeric"] = st.checkbox(
-                        "💰 تنظيف الأرقام المخلوطة",
-                        value=adv_opts.get("clean_numeric", False),
-                        help="إزالة الرموز والنصوص من الأعمدة الرقمية (1500 ج.م → 1500)"
-                    )
-                    
                     st.session_state.advanced_options["fuzzy_match"] = st.checkbox(
                         "🎯 الدمج الذكي للمتشابهات",
                         value=adv_opts.get("fuzzy_match", False),
                         help="دمج القيم المتشابهة جداً (القاهرة، القاهره → القاهرة)"
-                    )
-                
-                with col2:
-                    st.session_state.advanced_options["fix_dates"] = st.checkbox(
-                        "📅 التحقق المتقدم من التواريخ",
-                        value=adv_opts.get("fix_dates", False),
-                        help="التحقق من صحة التواريخ والتواريخ المستقبلية المستحيلة"
                     )
                     
                     st.session_state.advanced_options["optimize_memory"] = st.checkbox(
@@ -3052,6 +3143,8 @@ def main():
                         value=adv_opts.get("optimize_memory", False),
                         help="تقليل حجم البيانات في الذاكرة (float64→float32, إلخ)"
                     )
+                
+                with col2:
                     st.session_state.advanced_options["auto_drop_low_variance"] = st.checkbox(
                         "🧹 حذف الأعمدة الفارغة أو منخفضة التباين تلقائياً",
                         value=adv_opts.get("auto_drop_low_variance", False),
@@ -3105,7 +3198,7 @@ def main():
     # STEP 4 — EXPORT
     # ══════════════════════════════════════════════════════════════════════════
     elif st.session_state.step == 4:
-        df = st.session_state.df
+        df = get_export_dataframe()
 
         stage_header(
             "الرابعة | Fourth",
@@ -3182,7 +3275,7 @@ def main():
             alert(
                 "🔴 أحمر | Red = غير محدد / Not Specified  |  "
                 "🟡 أصفر | Yellow = قيمة شاذة | Outlier  |  "
-                "✨ أخضر نيون | Neon Green = نص مستنتج بذكاء | AI-Imputed Text  |  "
+                "✨ وردي فاتح | Light Pink = نص مستنتج بذكاء | AI-Imputed Text  |  "
                 "📅 تواريخ | Dates = YYYY-MM-DD",
                 "info"
             )
@@ -3194,17 +3287,18 @@ def main():
                     median_coords=st.session_state.get("median_imputed_cells", []),
                     outlier_coords=st.session_state.get("yellow_coordinates", []),
                     missing_coords=st.session_state.get("red_coordinates", []),
+                    imputed_coords=st.session_state.get("imputed_text_coords", []),
                 ),
                 use_container_width=True, height=420
             )
             
-            # NEW: Display imputed text cells with neon green highlighting
+            # NEW: Display imputed text cells with soft pink highlighting
             text_mask = st.session_state.get("text_imputation_mask")
             if text_mask is not None and (text_mask.sum().sum() > 0):
                 st.markdown("---")
                 st.subheader("✨ النصوص المستنتجة بذكاء | AI-Imputed Text Cells")
                 st.markdown(
-                    f"<div style='font-size:0.9rem;color:#86EFAC;font-weight:600;margin-bottom:1rem;'>"
+                    f"<div style='font-size:0.9rem;color:#991B1B;font-weight:600;margin-bottom:1rem;'>"
                     f"🎯 تم استنتاج واستكمال **{int(text_mask.sum().sum())}** خلية نصية بناءً على السياق والعلاقات في البيانات | "
                     f"**{int(text_mask.sum().sum())}** text cells were intelligently imputed based on context analysis."
                     f"</div>",

@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 DEFAULT_MISSING_TERMS = {
-    "", "na", "n/a", "n\a", "none", "null", "unknown",
+    "", "na", "n/a", "n\a", "nan", "none", "null", "unknown",
     "missing", "not available", "not applicable", "غير محدد", "غير متوفر",
     "ناقص", "بدون", "لا يوجد", "ليس متاح",
 }

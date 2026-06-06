@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import difflib
+import unicodedata
 
 from .date_cleaner import clean_dates_advanced
 
@@ -115,6 +117,18 @@ class AdvancedCleaner:
                     numeric_log["values_converted"],
                     "Mixed numeric cleaning",
                 )
+
+        # Name/company column cleanup: normalize spacing, unicode, and harmonize similar names
+        try:
+            df, name_log = clean_name_columns(df)
+            if name_log.get("columns_cleaned", 0) > 0:
+                self.audit_trail.log_bulk_change(
+                    name_log.get("harmonized", 0),
+                    "Name/company column normalization",
+                )
+        except Exception:
+            # non-fatal: don't break pipeline if name cleaning fails
+            pass
 
         if fuzzy_match:
             df, fuzzy_log = apply_fuzzy_matching(df)
@@ -242,7 +256,7 @@ def clean_phone_column(df: pd.DataFrame, col_name: Optional[str] = None) -> Tupl
 
 def _common_placeholder_regex(extra_terms: Optional[List[str]] = None) -> re.Pattern:
     base = [
-        r'unknown', r'null', r'none', r'n/?a', r'n\.?.a\.?', r'missing',
+        r'nan', r'unknown', r'null', r'none', r'n/?a', r'n\.?.a\.?', r'missing',
         r'not available', r'ناقص', r'غير\s+محدد', r'غير\s+متوفر', r'بيانات\s+ناقصة',
     ]
     if extra_terms:
@@ -495,7 +509,7 @@ def _find_contextual_sibling_value(
 ) -> Optional[str]:
     """
     Search for missing value in target_col by finding rows with matching context columns.
-    
+
     Strategy:
     1. Look for rows where context columns match the target row
     2. Return non-null value from target_col if found
@@ -503,35 +517,36 @@ def _find_contextual_sibling_value(
     """
     if context_cols is None or len(context_cols) == 0:
         return None
-    
+
     target_row = df.iloc[target_row_idx]
     best_candidate = None
     best_match_count = 0
-    
+    placeholder_rx = _common_placeholder_regex()
+
     for context_col in context_cols:
         if context_col not in df.columns or pd.isna(target_row[context_col]):
             continue
-        
+
         context_val = _normalize_for_matching(target_row[context_col])
         if not context_val:
             continue
-        
+
         # Find all rows where context_col matches
         mask = df[context_col].apply(lambda x: _normalize_for_matching(x) == context_val)
         matching_rows = df.index[mask & df[target_col].notna()]
-        
+
         if len(matching_rows) > 0:
             # Get the most common non-null value
             candidates = df.loc[matching_rows, target_col].dropna().astype(str)
             if len(candidates) > 0:
                 value_counts = candidates.value_counts()
-                candidate = str(value_counts.index[0])
-                match_count = len(matching_rows)
-                
-                if match_count > best_match_count:
-                    best_candidate = candidate
-                    best_match_count = match_count
-    
+                candidate = str(value_counts.index[0]).strip()
+                if candidate and not placeholder_rx.match(candidate):
+                    match_count = len(matching_rows)
+                    if match_count > best_match_count:
+                        best_candidate = candidate
+                        best_match_count = match_count
+
     return best_candidate
 
 
@@ -543,33 +558,33 @@ def _extract_value_from_descriptive_column(
 ) -> Optional[str]:
     """
     Extract missing categorical value from descriptive text using keyword matching.
-    
+
     Example:
     - Missing "Color" in row
     - "Product Description" = "Red leather jacket with zipper"
     - Keywords for Color category = {"red", "blue", "green", ...}
-    - Match "Red" from description → return as Color value
+    - Match "Red" from description -> return as Color value
     """
     if descriptive_cols is None or len(descriptive_cols) == 0:
         return None
-    
+
     if keywords is None:
         keywords = set()
-    
+
     for desc_col in descriptive_cols:
         if desc_col not in row.index or pd.isna(row[desc_col]):
             continue
-        
+
         desc_text = str(row[desc_col]).lower()
         keywords_from_desc = _extract_keywords_from_text(desc_text)
-        
+
         # Find intersection between keywords and description words
         matched_keywords = keywords_from_desc & keywords
-        
+
         if matched_keywords:
             # Return the first (most likely) matched keyword
             return list(matched_keywords)[0].capitalize()
-    
+
     return None
 
 
@@ -662,9 +677,11 @@ def dynamic_contextual_text_imputation(
         - Updated DataFrame with imputed text values
         - Boolean Mask DataFrame (True only where imputation occurred)
     """
-    # Work on a copy
-    df_filled = df.copy(deep=True)
+    # Mutate the source DataFrame directly so the same dataset object
+    # is used for UI rendering and export/download operations.
+    df_filled = df
     imputation_mask = pd.DataFrame(False, index=df.index, columns=df.columns)
+    predicted_mask = pd.DataFrame(False, index=df.index, columns=df.columns)
 
     # Universal Null Identification: normalize common placeholders to real NaN
     placeholder_rx = _common_placeholder_regex()
@@ -753,9 +770,10 @@ def dynamic_contextual_text_imputation(
 
             if imputed_value is not None:
                 df_filled.at[row_idx, target_col] = imputed_value
-                # Only mark as imputed if the cell was originally missing
+                # Only mark as predicted if the cell was originally missing
                 if original_missing.at[row_idx, target_col]:
                     imputation_mask.at[row_idx, target_col] = True
+                    predicted_mask.at[row_idx, target_col] = True
 
     # Final Fallback: Only after all intelligent attempts, fill remaining missing
     for target_col in target_columns:
@@ -765,8 +783,7 @@ def dynamic_contextual_text_imputation(
         if not still_missing.any():
             continue
 
-        # Choose fallback label: prefer Arabic 'غير محدد' when column is Arabic
-        fallback = "غير محدد" if _col_prefers_arabic(df_filled[target_col]) else "Not Specified"
+        fallback = "غير محدد"
 
         for idx in df_filled.index[still_missing]:
             # Only fill if originally missing (do not overwrite any existing non-missing)
@@ -774,4 +791,126 @@ def dynamic_contextual_text_imputation(
                 df_filled.at[idx, target_col] = fallback
                 imputation_mask.at[idx, target_col] = True
 
-    return df_filled, imputation_mask
+    return df_filled, predicted_mask
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Name detection & normalization helpers (small, focused improvements)
+# ═══════════════════════════════════════════════════════════════════════════════
+def _arabic_text_cleanup(text: str) -> str:
+    if text is None:
+        return ""
+    try:
+        s = str(text)
+        # Normalize unicode form and remove tatweel and extra diacritics
+        s = unicodedata.normalize('NFKC', s)
+        s = re.sub(r'[ـ]+', '', s)
+        s = re.sub(r'[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]', '', s)
+        return s.strip()
+    except Exception:
+        return str(text).strip()
+
+
+def detect_name_columns(df: pd.DataFrame) -> List[str]:
+    """Detect likely name/company columns using header keywords and simple heuristics."""
+    keywords = [
+        'name', 'full_name', 'fullname', 'customer', 'client', 'company', 'organisation', 'organization',
+        'person', 'contact', 'اسم', 'الاسم', 'اسم_الكامل', 'اسم العميل', 'شركة', 'اسم_الشركة', 'زبون'
+    ]
+    detected = []
+    for col in df.columns:
+        low = str(col).lower()
+        if any(kw in low for kw in keywords):
+            detected.append(col)
+            continue
+
+        # heuristic: text column with low-to-medium cardinality and contains words
+        if pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]):
+            non_null = df[col].dropna().astype(str).head(200)
+            if len(non_null) == 0:
+                continue
+            avg_words = sum(len(re.findall(r"\w+", v)) for v in non_null) / len(non_null)
+            card_ratio = df[col].nunique(dropna=True) / max(len(df[col]), 1)
+            if 1.0 <= avg_words <= 4.0 and card_ratio < 0.6:
+                detected.append(col)
+
+    return detected
+
+
+def clean_name_columns(df: pd.DataFrame, cols: Optional[List[str]] = None, similarity_threshold: float = 0.86) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """Clean and harmonize name/company columns.
+
+    - Normalizes whitespace and unicode
+    - Removes repeated punctuation
+    - Applies simple fuzzy harmonization using the most frequent existing values
+    Returns modified df and a small log.
+    """
+    log = {"columns_cleaned": 0, "values_normalized": 0, "harmonized": 0}
+    if cols is None:
+        cols = detect_name_columns(df)
+
+    df_copy = df.copy()
+
+    for col in cols:
+        if col not in df_copy.columns:
+            continue
+        series = df_copy[col].astype(object)
+        original = series.copy()
+
+        def _norm_name(v):
+            if v is None or pd.isna(v):
+                return np.nan
+            s = str(v).strip()
+            if s == "":
+                return np.nan
+            s = _arabic_text_cleanup(s)
+            # collapse multiple spaces and punctuation
+            s = re.sub(r'[\s\u00A0]+', ' ', s)
+            s = re.sub(r'[\-]{2,}', '-', s)
+            s = re.sub(r'[\._]{2,}', '.', s)
+            s = re.sub(r'[^\w\s\-\.,ء-يÀ-ÿ]', '', s)
+            # Normalize casing: if mostly ascii use title(), else keep as-is but strip
+            ascii_ratio = sum(1 for ch in s if ord(ch) < 128) / max(len(s), 1)
+            if ascii_ratio > 0.5:
+                s = s.title()
+            return s.strip()
+
+        series = series.apply(_norm_name)
+
+        # Fuzzy harmonization: build canonical list from most frequent existing names
+        candidates = [v for v in series.dropna().astype(str).unique() if v.strip() != ""]
+        canonical = []
+        canonical_map = {}
+        # sort candidates by frequency
+        freq = series.value_counts(dropna=True).to_dict()
+        candidates.sort(key=lambda x: freq.get(x, 0), reverse=True)
+
+        for c in candidates:
+            if c in canonical_map:
+                continue
+            canonical.append(c)
+            canonical_map[c] = c
+            # find close matches among remaining candidates
+            for other in candidates:
+                if other == c or other in canonical_map:
+                    continue
+                score = difflib.SequenceMatcher(a=c.lower(), b=other.lower()).ratio()
+                if score >= similarity_threshold:
+                    canonical_map[other] = c
+
+        # apply mapping
+        def _map_name(v):
+            if v is None or pd.isna(v) or str(v).strip() == "":
+                return np.nan
+            return canonical_map.get(str(v), v)
+
+        series = series.map(_map_name)
+
+        df_copy[col] = series
+
+        changes = int((original.fillna('') != series.fillna('')).sum())
+        log["columns_cleaned"] += 1
+        log["values_normalized"] += int(series.notna().sum())
+        log["harmonized"] += changes
+
+    return df_copy, log
